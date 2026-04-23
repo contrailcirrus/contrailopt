@@ -1,0 +1,34 @@
+[project]
+name = "contrailopt"
+dynamic = ["version"]
+requires-python = ">=3.11"
+authors = [{ name = "Contrails.org", email = "py@contrails.org" }]
+description = "Contrail-aware flight optimization"
+dependencies = [
+    "numpy",
+    "pandas",
+    "platformdirs",
+    "pycontrails",
+    "pyproj",
+    "requests",
+]
+
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["contrailopt"]
+
+[tool.setuptools_scm]
+write_to = "contrailopt/_version.py"
+local_scheme = "no-local-version"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
