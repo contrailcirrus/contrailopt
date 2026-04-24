@@ -8,7 +8,6 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
-from pycontrails import MetDataset
 from pycontrails.core import airports
 from pycontrails.physics import geo, units
 
@@ -36,6 +35,10 @@ class AirportCoords:
             latitude=row["latitude"].item(),
             elevation_ft=row["elevation_ft"].item(),
         )
+
+    @property
+    def coords(self) -> tuple[float, float]:
+        return self.longitude, self.latitude
 
 
 def _csr_flat_pos(
@@ -187,8 +190,9 @@ class HorizontalDAG:
         live = fwd & bwd
 
         # Remap node indices
+        n = live.sum()
         new_idx = np.full(self.n_nodes, -1, dtype=np.int64)
-        new_idx[live] = np.arange(live.sum())
+        new_idx[live] = np.arange(n, dtype=np.int64)
 
         # Filter edges and distances via CSR ordering
         mask = live[src] & live[self.adj]
@@ -197,7 +201,6 @@ class HorizontalDAG:
         new_edge_dist = self.edge_dist[mask]
 
         # Build new CSR (already sorted by source from parent CSR)
-        n = live.sum()
         adj_ptr = np.zeros(n + 1, dtype=np.int64)
         np.add.at(adj_ptr[1:], new_src, 1)
         np.cumsum(adj_ptr, out=adj_ptr)
@@ -458,17 +461,17 @@ class EdgeMetLookup:
 
 
 def preinterp_met(
-    met: MetDataset,
+    ds: xr.Dataset,
     dag: HorizontalDAG,
     fl_choices: npt.NDArray[np.floating],
     takeoff_time: pd.Timestamp,
     flight_hours: int,
-    spacing_m: float = 20_000.0,
+    spacing_m: float,
 ) -> EdgeMetLookup:
     """Interpolate met data onto edge sample points.
 
     Parameters:
-        met: Gridded meteorological dataset.
+        met: Gridded meteorological dataset with pycontrails conventions.
         dag: Horizontal DAG whose edges will be sampled.
         fl_choices: Flight level altitudes in feet to interpolate onto.
         takeoff_time: Departure time.
@@ -487,9 +490,9 @@ def preinterp_met(
     sample_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
     sample_dist[edge_ptr[:-1]] = 0.0
 
-    # Downselect met in time
+    # Downselect met in time, this will error if not all times are available
     times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
-    ds = met.data.sel(time=times)
+    ds = ds.sel(time=times)
 
     # Convert to altitude_ft coordinates
     altitude_ft = units.pl_to_ft(ds["level"])
