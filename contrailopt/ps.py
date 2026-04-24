@@ -210,8 +210,10 @@ def climb_to_target(
 ) -> tuple[float, float, float, float]:
     """Integrate climb from ground to target altitude in 1000 ft steps.
 
+    This function always uses the ISA temperature profile.
+
     Unlike climb_performance and compute_climb_segment, this function applies a realistic
-    IAS/Mach speed schedule with ATM speed limits below 10,000 ft. Not vectorized.
+    IAS/Mach speed schedule with ATM speed limits below 10,000 ft.
 
     Uses a fixed fraction of maximum continuous thrust and a climb angle of 3 degrees.
 
@@ -223,68 +225,91 @@ def climb_to_target(
 
     Raises AssertionError if ROCD drops below the threshold at any step.
     """
-    alt_ft = ground_alt_ft
+    # Build altitude bands and use the mid-point of each band for calculations.
+    band_edges = np.arange(ground_alt_ft, target_alt_ft + 1000.0, 1000.0)
+    band_edges[-1] = target_alt_ft  # last step may be < 1000 ft
+    steps = np.diff(band_edges)
+    mid_alt_ft = band_edges[:-1] + steps / 2.0
+    n = len(steps)
+
+    # Vectorize everything independent of the mass loop
+    air_pressure = units.ft_to_pl(mid_alt_ft) * 100.0
+    T_isa = units.m_to_T_isa(units.ft_to_m(mid_alt_ft))
+    mach_lim = ps_operational_limits.max_mach_number_by_altitude(
+        band_edges[:-1],
+        air_pressure,
+        atyp.max_mach_num,
+        atyp.p_i_max,
+        atyp.p_inf_co,
+        atm_speed_limit=True,
+        buffer=0.0,
+    )
+    mach = np.minimum(atyp.m_des, mach_lim)
+    tas = units.mach_number_to_tas(mach, T_isa)
+
+    rn = ps_model.reynolds_number(atyp.wing_surface_area, mach, T_isa, air_pressure)
+    c_f = ps_model.skin_friction_coefficient(rn)
+    c_drag_0 = ps_model.zero_lift_drag_coefficient(c_f, atyp.psi_0)
+    e_ls = ps_model.oswald_efficiency_factor(c_drag_0, atyp)
+    c_t_eta_b = ps_model.thrust_coefficient_at_max_efficiency(mach, atyp.m_des, atyp.c_t_des)
+    c_t_max = ps_operational_limits.max_available_thrust_coefficient(
+        T_isa,
+        mach,
+        c_t_eta_b,
+        atyp,
+        buffer=MAX_THRUST_BUFFER,
+    )
+    c_t_climb = THRUST_FRACTION * c_t_max
+
+    eta = ps_model.overall_propulsion_efficiency(
+        mach,
+        c_t_climb,
+        c_t_eta_b,
+        atyp,
+        engine_deterioration_factor=ENGINE_DETERIORATION_FACTOR,
+    )
+    ff = ps_model.fuel_mass_flow_rate(
+        air_pressure,
+        T_isa,
+        mach,
+        c_t_climb,
+        eta,
+        atyp.wing_surface_area,
+        q_fuel=JetA.q_fuel,
+    )
+
+    # Loop only for mass-dependent quantities: lift, drag, ROCD
+    climb_angle = 3.0
     total_dist = 0.0
     total_fuel = 0.0
     total_time = 0.0
-    climb_angle = 3.0  # doesn't matter much, 0.0 to 5.0 only changes ROCD by ~0.5%
 
-    while alt_ft < target_alt_ft:
-        step = min(1000.0, target_alt_ft - alt_ft)
-        mid_alt_ft = alt_ft + step / 2.0
-        air_pressure = units.ft_to_pl(mid_alt_ft) * 100.0
-        T_isa = units.m_to_T_isa(units.ft_to_m(mid_alt_ft))
-
-        mach_lim = ps_operational_limits.max_mach_number_by_altitude(
-            alt_ft,
-            air_pressure,
-            atyp.max_mach_num,
-            atyp.p_i_max,
-            atyp.p_inf_co,
-            atm_speed_limit=True,
-            buffer=0.0,
-        )
-        mach = min(atyp.m_des, mach_lim)
-        tas = units.mach_number_to_tas(mach, T_isa)
-
-        rn = ps_model.reynolds_number(atyp.wing_surface_area, mach, T_isa, air_pressure)
-        c_f = ps_model.skin_friction_coefficient(rn)
+    for i in range(n):
         c_lift = ps_model.lift_coefficient(
-            atyp.wing_surface_area, mass, air_pressure, mach, climb_angle
+            atyp.wing_surface_area,
+            mass,
+            air_pressure[i],
+            mach[i],
+            climb_angle,
         )
-        c_drag_0 = ps_model.zero_lift_drag_coefficient(c_f, atyp.psi_0)
-        e_ls = ps_model.oswald_efficiency_factor(c_drag_0, atyp)
-        c_drag_w = ps_model.wave_drag_coefficient(mach, c_lift, atyp)
+        c_drag_w = ps_model.wave_drag_coefficient(mach[i], c_lift, atyp)
         c_drag = ps_model.airframe_drag_coefficient(
-            c_drag_0, c_drag_w, c_lift, e_ls, atyp.wing_aspect_ratio
+            c_drag_0[i],
+            c_drag_w,
+            c_lift,
+            e_ls[i],
+            atyp.wing_aspect_ratio,
         )
-        c_t_eta_b = ps_model.thrust_coefficient_at_max_efficiency(mach, atyp.m_des, atyp.c_t_des)
-        c_t_max = ps_operational_limits.max_available_thrust_coefficient(
-            T_isa, mach, c_t_eta_b, atyp, buffer=MAX_THRUST_BUFFER
-        )
-        c_t_climb = THRUST_FRACTION * c_t_max
 
-        dh_dt = tas * (c_t_climb - c_drag) / c_lift
+        dh_dt = tas[i] * (c_t_climb[i] - c_drag) / c_lift
         rocd = units.m_to_ft(dh_dt) * 60.0
-        assert rocd > ROCD_CLIMB_THRESHOLD, f"ROCD {rocd:.0f} ft/min too low at alt {alt_ft:.0f} ft"
+        assert rocd > ROCD_CLIMB_THRESHOLD, f"ROCD {rocd:.0f} ft/min too low"
 
-        eta = ps_model.overall_propulsion_efficiency(
-            mach,
-            c_t_climb,
-            c_t_eta_b,
-            atyp,
-            engine_deterioration_factor=ENGINE_DETERIORATION_FACTOR,
-        )
-        ff = ps_model.fuel_mass_flow_rate(
-            air_pressure, T_isa, mach, c_t_climb, eta, atyp.wing_surface_area, q_fuel=JetA.q_fuel
-        )
-
-        dt_s = (step / rocd) * 60.0
-        total_dist += tas * dt_s
-        total_fuel += ff * dt_s
+        dt_s = (steps[i] / rocd) * 60.0
+        total_dist += tas[i] * dt_s
+        total_fuel += ff[i] * dt_s
         total_time += dt_s
-        mass -= ff * dt_s
-        alt_ft += step
+        mass -= ff[i] * dt_s
 
     return total_dist, total_fuel, total_time, mass
 
@@ -333,7 +358,7 @@ class DescentTable:
         If ``src_alt_ft <= dst_alt_ft``, returns (0.0, 0.0) for that entry.
         """
         src_alt_ft, dst_alt_ft = np.broadcast_arrays(src_alt_ft, dst_alt_ft)
-    
+
         src_idx = np.round(src_alt_ft / 1000.0).astype(int)
         dst_idx = np.round(dst_alt_ft / 1000.0).astype(int)
         np.clip(src_idx, 0, len(self._cum_time) - 1, out=src_idx)
