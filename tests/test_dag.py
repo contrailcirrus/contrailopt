@@ -113,19 +113,22 @@ class TestPrune:
 class TestTopoWavefronts:
     def test_diamond_two_wavefronts(self, diamond: HorizontalDAG) -> None:
         waves = list(diamond.topo_wavefronts())
-        assert len(waves) == 2
-        assert set(waves[0]) == {1, 2}
-        assert set(waves[1]) == {3}
+        assert len(waves) == 3
+        assert set(waves[0]) == {0}
+        assert set(waves[1]) == {1, 2}
+        assert set(waves[2]) == {3}
 
     def test_wavefronts_cover_all_non_origin(self, diamond: HorizontalDAG) -> None:
         waves = list(diamond.topo_wavefronts())
         all_wave_nodes = set(np.concatenate(waves).tolist())
-        assert all_wave_nodes == set(range(diamond.n_nodes)) - {diamond.h_origin}
+        assert all_wave_nodes == set(range(diamond.n_nodes))
 
     def test_lattice_wavefront_count(self, lattice: HorizontalDAG) -> None:
         pruned = lattice.prune()
         waves = list(pruned.topo_wavefronts())
-        assert len(waves) == 20
+        assert len(waves) == 21
+        assert waves[0].size == 1  # only origin in first wavefront
+        assert waves[0].tolist() == [pruned.h_origin]
 
     def test_wavefronts_are_acyclic(self, lattice: HorizontalDAG) -> None:
         pruned = lattice.prune()

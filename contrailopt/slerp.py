@@ -12,11 +12,11 @@ from pycontrails.physics import constants
 
 
 def spherical_azimuth(
-    lon1: npt.NDArray[np.floating],
-    lat1: npt.NDArray[np.floating],
-    lon2: npt.NDArray[np.floating],
-    lat2: npt.NDArray[np.floating],
-) -> npt.NDArray[np.floating]:
+    lon1: npt.NDArray[np.float64],
+    lat1: npt.NDArray[np.float64],
+    lon2: npt.NDArray[np.float64],
+    lat2: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
     """Forward azimuth (degrees) from ``(lon1, lat1)`` to ``(lon2, lat2)`` on a sphere.
 
     Equivalent to ``az, _, _ = geod.inv(lon1, lat1, lon2, lat2)``.
@@ -36,11 +36,11 @@ def spherical_azimuth(
 
 
 def spherical_fwd(
-    lon: npt.NDArray[np.floating],
-    lat: npt.NDArray[np.floating],
-    az: npt.NDArray[np.floating],
-    dist: npt.NDArray[np.floating],
-) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    lon: npt.NDArray[np.float64],
+    lat: npt.NDArray[np.float64],
+    az: npt.NDArray[np.float64],
+    dist: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Project from ``(lon, lat)`` along azimuth by dist meters on a sphere.
 
     Equivalent to ``lon2, lat2, _ = geod.fwd(lon, lat, az, dist)``.
@@ -64,12 +64,12 @@ def spherical_fwd(
 
 
 def gc_interp(
-    lon1: npt.NDArray[np.floating],
-    lat1: npt.NDArray[np.floating],
-    lon2: npt.NDArray[np.floating],
-    lat2: npt.NDArray[np.floating],
-    frac: npt.NDArray[np.floating],
-) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    lon1: npt.NDArray[np.float64],
+    lat1: npt.NDArray[np.float64],
+    lon2: npt.NDArray[np.float64],
+    lat2: npt.NDArray[np.float64],
+    frac: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Interpolate along great circles via SLERP.
 
     Equivalent to ``geod.fwd(lon1, lat1, az, frac * dist)`` but without
@@ -117,7 +117,7 @@ def gc_npts(
     lon2: float,
     lat2: float,
     n: int,
-) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Return n equally-spaced intermediate points along a great circle.
 
     Equivalent to ``geod.npts(lon1, lat1, lon2, lat2, n)``.

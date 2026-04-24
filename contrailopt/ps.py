@@ -13,12 +13,12 @@ MAX_THRUST_BUFFER = 0.0
 
 
 def cruise_performance(
-    alt_ft: npt.NDArray[np.floating],
-    mach: npt.NDArray[np.floating],
-    mass: npt.NDArray[np.floating],
-    air_temperature: npt.NDArray[np.floating],
+    alt_ft: npt.NDArray[np.float64],
+    mach: npt.NDArray[np.float64],
+    mass: npt.NDArray[np.float64],
+    air_temperature: npt.NDArray[np.float64],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
-) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.bool_]]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
     """Run PS model chain for cruise at a given Mach.
 
     Return a tuple of:
@@ -67,14 +67,14 @@ def cruise_performance(
 
 
 def climb_performance(
-    alt_ft: npt.NDArray[np.floating],
-    mass: npt.NDArray[np.floating],
-    air_temperature: npt.NDArray[np.floating],
+    alt_ft: npt.NDArray[np.float64],
+    mass: npt.NDArray[np.float64],
+    air_temperature: npt.NDArray[np.float64],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
 ) -> tuple[
-    npt.NDArray[np.floating],
-    npt.NDArray[np.floating],
-    npt.NDArray[np.floating],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
     npt.NDArray[np.bool_],
 ]:
     """Evaluate instantaneous climb performance at a single point.
@@ -139,15 +139,15 @@ def climb_performance(
 
 
 def compute_climb_segment(
-    src_alt_ft: npt.NDArray[np.floating],
-    dst_alt_ft: npt.NDArray[np.floating],
-    src_mass: npt.NDArray[np.floating],
+    src_alt_ft: npt.NDArray[np.float64],
+    dst_alt_ft: npt.NDArray[np.float64],
+    src_mass: npt.NDArray[np.float64],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
 ) -> tuple[
-    npt.NDArray[np.floating],
-    npt.NDArray[np.floating],
-    npt.NDArray[np.floating],
-    npt.NDArray[np.floating],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
     npt.NDArray[np.bool_],
 ]:
     """Integrate climb from ``src_alt_ft`` to ``dst_alt_ft`` in 1000 ft steps.
@@ -346,9 +346,9 @@ class DescentTable:
 
     def __call__(
         self,
-        src_alt_ft: npt.NDArray[np.floating],
-        dst_alt_ft: npt.NDArray[np.floating],
-    ) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+        src_alt_ft: npt.NDArray[np.float64],
+        dst_alt_ft: npt.NDArray[np.float64],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """Look up descent distance and time from ``src_alt_ft`` to ``dst_alt_ft``.
 
         Return a tuple of:

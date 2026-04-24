@@ -42,9 +42,9 @@ class AirportCoords:
 
 
 def _csr_flat_pos(
-    adj_ptr: npt.NDArray[np.integer],
-    nodes: npt.NDArray[np.integer],
-) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.integer]]:
+    adj_ptr: npt.NDArray[np.int64],
+    nodes: npt.NDArray[np.int64],
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Return flat indices into CSR data arrays for a batch of row nodes.
 
     Returns ``(flat_pos, lengths)`` where flat_pos indexes into adj/edge_dist
@@ -59,10 +59,10 @@ def _csr_flat_pos(
 
 
 def _neighbors_batch(
-    adj_ptr: npt.NDArray[np.integer],
-    adj: npt.NDArray[np.integer],
-    nodes: npt.NDArray[np.integer],
-) -> npt.NDArray[np.integer]:
+    adj_ptr: npt.NDArray[np.int64],
+    adj: npt.NDArray[np.int64],
+    nodes: npt.NDArray[np.int64],
+) -> npt.NDArray[np.int64]:
     """Determine neighbors (duplicates included with multiplicity) for a batch of nodes."""
     flat_pos, _ = _csr_flat_pos(adj_ptr, nodes)
     return adj[flat_pos]
@@ -71,8 +71,8 @@ def _neighbors_batch(
 def _reachability(
     seed: int,
     n_nodes: int,
-    adj_ptr: npt.NDArray[np.integer],
-    adj: npt.NDArray[np.integer],
+    adj_ptr: npt.NDArray[np.int64],
+    adj: npt.NDArray[np.int64],
 ) -> npt.NDArray[np.bool_]:
     """Return boolean array of nodes reachable from seed via batch_neighbors."""
     seen = np.zeros(n_nodes, dtype=bool)
@@ -89,10 +89,10 @@ def _reachability(
 
 
 def _reverse_csr(
-    adj: npt.NDArray[np.integer],
+    adj: npt.NDArray[np.int64],
     n_nodes: int,
-    src: npt.NDArray[np.integer],
-) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.integer]]:
+    src: npt.NDArray[np.int64],
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Compute reverse (dst -> src) CSR representation."""
     order = np.argsort(adj)
 
@@ -107,11 +107,11 @@ def _reverse_csr(
 class HorizontalDAG:
     """Directed graph on (lon, lat) nodes with CSR adjacency."""
 
-    lon: npt.NDArray[np.floating]  # (N,)
-    lat: npt.NDArray[np.floating]  # (N,)
-    adj_ptr: npt.NDArray[np.integer]  # (N + 1,) CSR row pointers
-    adj: npt.NDArray[np.integer]  # (M,) neighbor indices, the destinations of directed edges
-    edge_dist: npt.NDArray[np.floating]  # (M,) great-circle distance per edge in meters
+    lon: npt.NDArray[np.float64]  # (N,)
+    lat: npt.NDArray[np.float64]  # (N,)
+    adj_ptr: npt.NDArray[np.int64]  # (N + 1,) CSR row pointers
+    adj: npt.NDArray[np.int64]  # (M,) neighbor indices, the destinations of directed edges
+    edge_dist: npt.NDArray[np.float64]  # (M,) great-circle distance per edge in meters
     h_origin: int  # index of the distinguished origin node
     h_dest: int  # index of the distinguished destination node
 
@@ -129,51 +129,57 @@ class HorizontalDAG:
         return len(self.adj)
 
     @property
-    def out_degree(self) -> npt.NDArray[np.integer]:
+    def out_degree(self) -> npt.NDArray[np.int64]:
         """The out-degree of each node."""
         return np.diff(self.adj_ptr)
 
     @property
-    def edge_src(self) -> npt.NDArray[np.integer]:
+    def edge_src(self) -> npt.NDArray[np.int64]:
         """The source endpoint index of each directed edge."""
         return np.repeat(np.arange(self.n_nodes, dtype=np.int64), self.out_degree)
 
     @property
-    def edges(self) -> npt.NDArray[np.integer]:
+    def edges(self) -> npt.NDArray[np.int64]:
         """The directed edges of the graph as (src, dest) index pairs in an ``(M, 2)`` array."""
         return np.column_stack([self.edge_src, self.adj])
 
-    def neighbors(self, i: int) -> npt.NDArray[np.integer]:
+    def neighbors(self, i: int) -> npt.NDArray[np.int64]:
         """Return the neighbors of a specified node."""
         return self.adj[self.adj_ptr[i] : self.adj_ptr[i + 1]]
 
-    def neighbors_batch(self, nodes: npt.NDArray[np.integer]) -> npt.NDArray[np.integer]:
+    def neighbors_batch(self, nodes: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
         """Return neighbors (duplicates included with multiplicity) for a batch of nodes."""
         return _neighbors_batch(self.adj_ptr, self.adj, nodes)
 
-    def edge_distances(self, i: int) -> npt.NDArray[np.floating]:
+    def edge_distances(self, i: int) -> npt.NDArray[np.float64]:
         return self.edge_dist[self.adj_ptr[i] : self.adj_ptr[i + 1]]
 
     def expand_neighbors(
-        self, nodes: npt.NDArray[np.integer]
-    ) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        self, nodes: npt.NDArray[np.int64]
+    ) -> tuple[
+        npt.NDArray[np.int64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.int64],
+        npt.NDArray[np.int64],
+    ]:
         """Expand CSR adjacency for a batch of nodes into flat edge arrays.
 
-        Generalizes :meth:`neighbors_batch` by also returning edge distances
-        and a source-index mapping.
+        Generalizes :meth:`neighbors_batch` by also returning edge distances,
+        a source-index mapping, and the raw CSR edge indices.
 
-        Returns ``(flat_nbr, flat_dist, src_idx)`` where:
+        Returns ``(flat_nbr, flat_dist, src_idx, flat_edge_idx)`` where:
         - flat_nbr: (F,) neighbor indices for all edges leaving nodes.
         - flat_dist: (F,) edge distances in meters for those edges.
         - src_idx: (F,) index into nodes for each flat entry, so
           ``nodes[src_idx[k]]`` is the source node of flat edge k.
+        - flat_edge_idx: (F,) index of each edge in the CSR arrays (adj, edge_dist).
 
         Here F is the total number of outgoing edges from all ``nodes`` (with multiplicity,
         since the same neighbor can appear via different source nodes).
         """
         flat_pos, lengths = _csr_flat_pos(self.adj_ptr, nodes)
         src_idx = np.repeat(np.arange(len(nodes)), lengths)
-        return self.adj[flat_pos], self.edge_dist[flat_pos], src_idx
+        return self.adj[flat_pos], self.edge_dist[flat_pos], src_idx, flat_pos
 
     def adjacency_matrix(self) -> npt.NDArray[np.bool]:
         """Return dense boolean adjacency matrix A where A[i, j] is True for i->j."""
@@ -218,10 +224,10 @@ class HorizontalDAG:
     def sample_edges(
         self, spacing_m: float = 20_000.0
     ) -> tuple[
-        npt.NDArray[np.floating],
-        npt.NDArray[np.floating],
-        npt.NDArray[np.integer],
-        npt.NDArray[np.integer],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.int64],
+        npt.NDArray[np.int64],
     ]:
         """Sample points along every edge at roughly ``spacing_m`` meter intervals.
 
@@ -317,8 +323,8 @@ class HorizontalDAG:
     @classmethod
     def from_points(
         cls,
-        lon: npt.NDArray[np.floating],
-        lat: npt.NDArray[np.floating],
+        lon: npt.NDArray[np.float64],
+        lat: npt.NDArray[np.float64],
         origin_idx: int = 0,
         dest_idx: int = -1,
         max_angle_deg: float = 40.0,
@@ -402,10 +408,10 @@ class HorizontalDAG:
             max_dist_m=max_dist_m,
         )
 
-    def topo_wavefronts(self) -> Generator[npt.NDArray[np.integer], None, None]:
+    def topo_wavefronts(self) -> Generator[npt.NDArray[np.int64], None, None]:
         """Return topological wavefronts reachable from origin.
 
-        Exclude the first wavefront containing only the origin.
+        The first wavefront contains only the origin.
 
         Wavefront k contains nodes whose remaining in-degree is zero after removing
         wavefronts 0..k-1. Therefore edges and paths only go from earlier wavefronts
@@ -415,16 +421,14 @@ class HorizontalDAG:
         np.add.at(in_degree, self.adj, 1)
 
         wave_nodes = np.array([self.h_origin])
-        while True:
+        while wave_nodes.size:
+            yield wave_nodes
+
             neighbors = self.neighbors_batch(wave_nodes)
             np.subtract.at(in_degree, neighbors, 1)
             candidates = np.unique(neighbors)
             filt = in_degree[candidates] == 0
             wave_nodes = candidates[filt]
-
-            if wave_nodes.size == 0:
-                break
-            yield wave_nodes
 
 
 @dataclass(kw_only=True, slots=True)
@@ -440,14 +444,17 @@ class EdgeMetLookup:
         sample_lon: Longitude of each sample point (n_samples,).
         sample_lat: Latitude of each sample point (n_samples,).
         sample_dist: Distance from edge source to each sample point in meters (n_samples,).
+        sample_seg_dist: Distance in meters from this sample to the next (n_samples,).
+            The last sample of each edge has seg_dist = 0.
     """
 
     ds: xr.Dataset
-    edge_ptr: npt.NDArray[np.integer]
-    edge_idx: npt.NDArray[np.integer]
-    sample_lon: npt.NDArray[np.floating]
-    sample_lat: npt.NDArray[np.floating]
-    sample_dist: npt.NDArray[np.floating]
+    edge_ptr: npt.NDArray[np.int64]
+    edge_idx: npt.NDArray[np.int64]
+    sample_lon: npt.NDArray[np.float64]
+    sample_lat: npt.NDArray[np.float64]
+    sample_dist: npt.NDArray[np.float64]
+    sample_seg_dist: npt.NDArray[np.float64]
 
     def sel_edge(self, edge_i: int) -> xr.Dataset:
         """Return met data for all samples along a single edge."""
@@ -455,7 +462,7 @@ class EdgeMetLookup:
         e = self.edge_ptr[edge_i + 1]
         return self.ds.isel(sample=slice(s, e))
 
-    def sel_edges(self, edge_indices: npt.NDArray[np.integer]) -> list[xr.Dataset]:
+    def sel_edges(self, edge_indices: npt.NDArray[np.int64]) -> list[xr.Dataset]:
         """Return met data slices for a batch of edges."""
         return [self.sel_edge(i) for i in edge_indices]
 
@@ -463,7 +470,7 @@ class EdgeMetLookup:
 def preinterp_met(
     ds: xr.Dataset,
     dag: HorizontalDAG,
-    fl_choices: npt.NDArray[np.floating],
+    fl_choices: npt.NDArray[np.float64],
     takeoff_time: pd.Timestamp,
     flight_hours: int,
     spacing_m: float,
@@ -490,6 +497,13 @@ def preinterp_met(
     sample_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
     sample_dist[edge_ptr[:-1]] = 0.0
 
+    # Per-sample segment distance to next sample
+    next_lon = np.roll(sample_lon, -1)
+    next_lat = np.roll(sample_lat, -1)
+    sample_seg_dist = geo.haversine(sample_lon, sample_lat, next_lon, next_lat)
+    last = edge_ptr[1:] - 1
+    sample_seg_dist[last] = 0.0
+
     # Downselect met in time, this will error if not all times are available
     times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
     ds = ds.sel(time=times)
@@ -512,17 +526,18 @@ def preinterp_met(
         sample_lon=sample_lon,
         sample_lat=sample_lat,
         sample_dist=sample_dist,
+        sample_seg_dist=sample_seg_dist,
     )
 
 
 def _dual_az_edges(
-    lon: npt.NDArray[np.floating],
-    lat: npt.NDArray[np.floating],
+    lon: npt.NDArray[np.float64],
+    lat: npt.NDArray[np.float64],
     origin_idx: int,
     dest_idx: int,
     max_angle_deg: float = 40.0,
     max_dist_m: float = 500_000.0,
-) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.floating]]:
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
     """Build directed edges using a dual azimuth constraint.
 
     For each pair of nodes within ``max_dist_m``, the directed edge tail -> head
