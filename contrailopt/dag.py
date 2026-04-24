@@ -38,17 +38,31 @@ class AirportCoords:
         )
 
 
+def _csr_flat_pos(
+    adj_ptr: npt.NDArray[np.integer],
+    nodes: npt.NDArray[np.integer],
+) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.integer]]:
+    """Return flat indices into CSR data arrays for a batch of row nodes.
+
+    Returns ``(flat_pos, lengths)`` where flat_pos indexes into adj/edge_dist
+    and lengths[i] is the number of entries for nodes[i].
+    """
+    starts = adj_ptr[nodes]
+    lengths = adj_ptr[nodes + 1] - starts
+    flat_starts = np.repeat(starts, lengths)
+    offsets = np.arange(lengths.sum()) - np.repeat(np.cumsum(lengths) - lengths, lengths)
+    flat_pos = flat_starts + offsets
+    return flat_pos, lengths
+
+
 def _neighbors_batch(
     adj_ptr: npt.NDArray[np.integer],
     adj: npt.NDArray[np.integer],
     nodes: npt.NDArray[np.integer],
 ) -> npt.NDArray[np.integer]:
     """Determine neighbors (duplicates included with multiplicity) for a batch of nodes."""
-    starts = adj_ptr[nodes]
-    lengths = adj_ptr[nodes + 1] - starts
-    flat_starts = np.repeat(starts, lengths)
-    offsets = np.arange(lengths.sum()) - np.repeat(np.cumsum(lengths) - lengths, lengths)
-    return adj[flat_starts + offsets]
+    flat_pos, _ = _csr_flat_pos(adj_ptr, nodes)
+    return adj[flat_pos]
 
 
 def _reachability(
@@ -136,6 +150,27 @@ class HorizontalDAG:
 
     def edge_distances(self, i: int) -> npt.NDArray[np.floating]:
         return self.edge_dist[self.adj_ptr[i] : self.adj_ptr[i + 1]]
+
+    def expand_neighbors(
+        self, nodes: npt.NDArray[np.integer]
+    ) -> tuple[npt.NDArray[np.integer], npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        """Expand CSR adjacency for a batch of nodes into flat edge arrays.
+
+        Generalizes :meth:`neighbors_batch` by also returning edge distances
+        and a source-index mapping.
+
+        Returns ``(flat_nbr, flat_dist, src_idx)`` where:
+        - flat_nbr: (F,) neighbor indices for all edges leaving nodes.
+        - flat_dist: (F,) edge distances in meters for those edges.
+        - src_idx: (F,) index into nodes for each flat entry, so
+          ``nodes[src_idx[k]]`` is the source node of flat edge k.
+
+        Here F is the total number of outgoing edges from all ``nodes`` (with multiplicity,
+        since the same neighbor can appear via different source nodes).
+        """
+        flat_pos, lengths = _csr_flat_pos(self.adj_ptr, nodes)
+        src_idx = np.repeat(np.arange(len(nodes)), lengths)
+        return self.adj[flat_pos], self.edge_dist[flat_pos], src_idx
 
     def adjacency_matrix(self) -> npt.NDArray[np.bool]:
         """Return dense boolean adjacency matrix A where A[i, j] is True for i->j."""
