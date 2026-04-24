@@ -7,11 +7,12 @@ from typing import Self
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-import pyproj
 import xarray as xr
 from pycontrails import MetDataset
 from pycontrails.core import airports
 from pycontrails.physics import geo, units
+
+from contrailopt.slerp import gc_interp, gc_npts, spherical_azimuth, spherical_fwd
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -193,8 +194,12 @@ class HorizontalDAG:
           sample_lon[edge_ptr[i]:edge_ptr[i+1]].
         """
         src = self.edge_src
-        geod = pyproj.Geod(ellps="WGS84")
-        az, _, dist = geod.inv(self.lon[src], self.lat[src], self.lon[self.adj], self.lat[self.adj])
+        src_lon = self.lon[src]
+        src_lat = self.lat[src]
+        dst_lon = self.lon[self.adj]
+        dst_lat = self.lat[self.adj]
+
+        dist = geo.haversine(src_lon, src_lat, dst_lon, dst_lat)
 
         n_samples = np.maximum(np.ceil(dist / spacing_m).astype(int) + 1, 2)
         edge_ptr = np.zeros(self.n_edges + 1, dtype=np.int64)
@@ -204,11 +209,12 @@ class HorizontalDAG:
         local_idx = np.arange(total) - np.repeat(edge_ptr[:-1], n_samples)
         frac = local_idx / np.repeat(n_samples - 1, n_samples)
 
-        sample_lon, sample_lat, _ = geod.fwd(
-            np.repeat(self.lon[src], n_samples),
-            np.repeat(self.lat[src], n_samples),
-            np.repeat(az, n_samples),
-            frac * np.repeat(dist, n_samples),
+        sample_lon, sample_lat = gc_interp(
+            np.repeat(src_lon, n_samples),
+            np.repeat(src_lat, n_samples),
+            np.repeat(dst_lon, n_samples),
+            np.repeat(dst_lat, n_samples),
+            frac,
         )
 
         edge_idx = np.repeat(np.arange(self.n_edges), n_samples)
@@ -314,8 +320,7 @@ class HorizontalDAG:
         """Build a DAG from Poisson-disk sampled points along the OD great circle."""
         from scipy.stats.qmc import PoissonDisk
 
-        geod = pyproj.Geod(ellps="WGS84")
-        _, _, gs_distance = geod.inv(origin_lon, origin_lat, dest_lon, dest_lat)
+        gs_distance = geo.haversine(origin_lon, origin_lat, dest_lon, dest_lat)
 
         if max_cross_track is None:
             max_cross_track = min(1_000_000.0, gs_distance / 4.0)
@@ -323,12 +328,12 @@ class HorizontalDAG:
         nx = int(gs_distance / 100_000.0) + 1
 
         # Great circle spine
-        gc_points = geod.npts(origin_lon, origin_lat, dest_lon, dest_lat, nx - 2)
-        gc_lons = np.array([origin_lon] + [p[0] for p in gc_points] + [dest_lon])
-        gc_lats = np.array([origin_lat] + [p[1] for p in gc_points] + [dest_lat])
+        gc_lons, gc_lats = gc_npts(origin_lon, origin_lat, dest_lon, dest_lat, nx - 2)
+        gc_lons = np.concatenate([[origin_lon], gc_lons, [dest_lon]])
+        gc_lats = np.concatenate([[origin_lat], gc_lats, [dest_lat]])
 
         # Perpendicular azimuths along spine
-        az_fwd, _, _ = geod.inv(gc_lons[:-1], gc_lats[:-1], gc_lons[1:], gc_lats[1:])
+        az_fwd = spherical_azimuth(gc_lons[:-1], gc_lats[:-1], gc_lons[1:], gc_lats[1:])
         az_perp = np.empty(nx)
         az_perp[:-1] = az_fwd + 90.0
         az_perp[-1] = az_perp[-2]
@@ -348,7 +353,7 @@ class HorizontalDAG:
         lon_base = np.interp(t, t_gc, gc_lons)
         lat_base = np.interp(t, t_gc, gc_lats)
         az_base = np.interp(t, t_gc, az_perp)
-        lon, lat, _ = geod.fwd(lon_base, lat_base, az_base, cross)
+        lon, lat = spherical_fwd(lon_base, lat_base, az_base, cross)
 
         return cls.from_points(
             lon,
@@ -441,12 +446,10 @@ def preinterp_met(
     sample_lon, sample_lat, edge_idx, edge_ptr = dag.sample_edges(spacing_m=spacing_m)
 
     # Compute cumulative distance from edge source per sample
-    geod = pyproj.Geod(ellps="WGS84")
-
     edge_src = dag.edge_src[edge_idx]
     src_lon = dag.lon[edge_src]
     src_lat = dag.lat[edge_src]
-    _, _, sample_dist = geod.inv(src_lon, src_lat, sample_lon, sample_lat)
+    sample_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
     sample_dist[edge_ptr[:-1]] = 0.0
 
     # Downselect met in time
@@ -511,25 +514,18 @@ def _dual_az_edges(
     )
     tail, head = np.nonzero((dist > 0.0) & (dist <= max_dist_m))
 
-    # Broadcast (Geod.inv doesn't support broadcasting)
-    n = len(lon)
-    origin_lat = np.full(n, lat[origin_idx])
-    origin_lon = np.full(n, lon[origin_idx])
-    dest_lat = np.full(n, lat[dest_idx])
-    dest_lon = np.full(n, lon[dest_idx])
-
     # Precompute per-node azimuths from each node to dest and origin
-    geod = pyproj.Geod(ellps="WGS84")
-    az_to_dest, _, _ = geod.inv(lon, lat, dest_lon, dest_lat)
-    az_to_origin, _, _ = geod.inv(lon, lat, origin_lon, origin_lat)
+    az_to_dest = spherical_azimuth(lon, lat, lon[dest_idx], lat[dest_idx])
+    az_to_origin = spherical_azimuth(lon, lat, lon[origin_idx], lat[origin_idx])
 
-    # Expensive: compute azimuths for all candidate edges
-    az_forward, az_reverse, _ = geod.inv(lon[tail], lat[tail], lon[head], lat[head])
+    # Compute azimuths for all candidate edges
+    az_at_tail = spherical_azimuth(lon[tail], lat[tail], lon[head], lat[head])
+    at_at_head = spherical_azimuth(lon[head], lat[head], lon[tail], lat[tail])
 
     # Compute delta angles for azimuth(tail -> head) vs azimuth(tail -> dest)
     # and for azimuth(head -> tail) vs azimuth(head -> origin)
-    delta_tail = np.abs((az_forward - az_to_dest[tail] + 180.0) % 360.0 - 180.0)
-    delta_head = np.abs((az_reverse - az_to_origin[head] + 180.0) % 360.0 - 180.0)
+    delta_tail = np.abs((az_at_tail - az_to_dest[tail] + 180.0) % 360.0 - 180.0)
+    delta_head = np.abs((at_at_head - az_to_origin[head] + 180.0) % 360.0 - 180.0)
 
     keep = (delta_tail <= max_angle_deg) & (delta_head <= max_angle_deg)
     edges = np.column_stack([tail[keep], head[keep]])

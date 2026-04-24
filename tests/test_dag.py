@@ -72,7 +72,7 @@ class TestFromPoints:
 
     def test_lattice_structure(self, lattice: HorizontalDAG) -> None:
         assert lattice.n_nodes == 441
-        assert lattice.n_edges == 2252
+        assert lattice.n_edges == 2240
 
     def test_all_edges_forward(self, lattice: HorizontalDAG) -> None:
         """Every edge points strictly eastward on the lattice."""
@@ -89,7 +89,7 @@ class TestPrune:
     def test_lattice_prune_removes_nodes(self, lattice: HorizontalDAG) -> None:
         pruned = lattice.prune()
         assert pruned.n_nodes == 127
-        assert pruned.n_edges == 1244
+        assert pruned.n_edges == 1240
         assert pruned.n_nodes < lattice.n_nodes
 
     def test_prune_connectivity(self, lattice: HorizontalDAG) -> None:
