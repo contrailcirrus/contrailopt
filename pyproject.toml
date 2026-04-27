@@ -9,8 +9,15 @@ dependencies = [
     "pandas",
     "platformdirs",
     "pycontrails",
-    "pyproj",
     "requests",
+]
+
+[dependency-groups]
+dev = [
+    "pyarrow",  # test_waypoints writes to parquet
+    "pyproj",  # test_slerp
+    "pytest",
+    "ruff",
 ]
 
 [build-system]
@@ -24,11 +31,41 @@ packages = ["contrailopt"]
 write_to = "contrailopt/_version.py"
 local_scheme = "no-local-version"
 
-[dependency-groups]
-dev = ["pytest", "ruff"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "B",
+    "C4",
+    "D",
+    "E",
+    "F",
+    "I",
+    "ICN",
+    "ISC",
+    "NPY",
+    "PT",
+    "PTH",
+    "RET",
+    "RUF",
+    "S",
+    "SIM",
+    "TC",
+    "TID",
+    "UP",
+    "W",
+]
+ignore = [
+    "D105",  # Missing docstring in magic method
+    "D413",  # Missing blank line after last section
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["D", "S101"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
