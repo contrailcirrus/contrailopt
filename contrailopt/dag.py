@@ -115,10 +115,10 @@ class HorizontalDAG:
     """Directed graph on (lon, lat) nodes with CSR adjacency."""
 
     #: Longitude of each node in degrees ``(n,)``.
-    lon: npt.NDArray[np.float64]
+    lon: npt.NDArray[np.floating]
 
     #: Latitude of each node in degrees ``(n,)``.
-    lat: npt.NDArray[np.float64]
+    lat: npt.NDArray[np.floating]
 
     #: CSR row pointers ``(n + 1,)``.
     #: Neighbors of node ``i`` are ``adj[adj_ptr[i]: adj_ptr[i+1]]``.
@@ -128,7 +128,7 @@ class HorizontalDAG:
     adj: npt.NDArray[np.int64]
 
     #: Great-circle distance in meters for each directed edge ``(m,)``.
-    edge_dist: npt.NDArray[np.float64]
+    edge_dist: npt.NDArray[np.floating]
 
     #: Index of the distinguished origin node.
     h_origin: int
@@ -177,7 +177,7 @@ class HorizontalDAG:
         self, nodes: npt.NDArray[np.int64]
     ) -> tuple[
         npt.NDArray[np.int64],
-        npt.NDArray[np.float64],
+        npt.NDArray[np.floating],
         npt.NDArray[np.int64],
         npt.NDArray[np.int64],
     ]:
@@ -266,8 +266,8 @@ class HorizontalDAG:
     def sample_edges(
         self, spacing_m: float
     ) -> tuple[
-        npt.NDArray[np.float64],
-        npt.NDArray[np.float64],
+        npt.NDArray[np.floating],
+        npt.NDArray[np.floating],
         npt.NDArray[np.int64],
         npt.NDArray[np.int64],
     ]:
@@ -656,7 +656,7 @@ class EdgeMetLookup:
         cls,
         met: MetDataset,
         dag: HorizontalDAG,
-        altitude_ft: npt.NDArray[np.float64],
+        altitude_ft: npt.NDArray[np.floating],
         takeoff_time: pd.Timestamp,
         flight_hours: int,
         spacing_m: float,
