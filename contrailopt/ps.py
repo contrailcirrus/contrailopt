@@ -13,12 +13,12 @@ MAX_THRUST_BUFFER = 0.0
 
 
 def cruise_performance(
-    alt_ft: npt.NDArray[np.float64],
-    mach: npt.NDArray[np.float64],
-    mass: npt.NDArray[np.float64],
-    air_temperature: npt.NDArray[np.float64],
+    alt_ft: npt.NDArray[np.floating],
+    mach: npt.NDArray[np.floating],
+    mass: npt.NDArray[np.floating],
+    air_temperature: npt.NDArray[np.floating],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.bool_]]:
     """Run PS model chain for cruise at a given Mach.
 
     Return a tuple of:
@@ -28,10 +28,11 @@ def cruise_performance(
     Infeasible conditions are those where the required thrust exceeds the maximum continuous thrust.
     """
     air_pressure = units.ft_to_pl(alt_ft) * 100.0
+    angle = np.float32(0.0)  # avoid needless promotion to float64 in ps_model.lift_coefficient
 
     rn = ps_model.reynolds_number(atyp.wing_surface_area, mach, air_temperature, air_pressure)
     c_f = ps_model.skin_friction_coefficient(rn)
-    c_lift = ps_model.lift_coefficient(atyp.wing_surface_area, mass, air_pressure, mach, 0.0)
+    c_lift = ps_model.lift_coefficient(atyp.wing_surface_area, mass, air_pressure, mach, angle)
     c_drag_0 = ps_model.zero_lift_drag_coefficient(c_f, atyp.psi_0)
     e_ls = ps_model.oswald_efficiency_factor(c_drag_0, atyp)
     c_drag_w = ps_model.wave_drag_coefficient(mach, c_lift, atyp)
@@ -39,7 +40,7 @@ def cruise_performance(
         c_drag_0, c_drag_w, c_lift, e_ls, atyp.wing_aspect_ratio
     )
 
-    f_thrust = ps_model.thrust_force(mass, c_lift, c_drag, 0.0, 0.0)
+    f_thrust = ps_model.thrust_force(mass, c_lift, c_drag, 0.0, angle)
     c_t = ps_model.engine_thrust_coefficient(f_thrust, mach, air_pressure, atyp.wing_surface_area)
     c_t_eta_b = ps_model.thrust_coefficient_at_max_efficiency(mach, atyp.m_des, atyp.c_t_des)
     c_t_max = ps_operational_limits.max_available_thrust_coefficient(
@@ -67,14 +68,14 @@ def cruise_performance(
 
 
 def climb_performance(
-    alt_ft: npt.NDArray[np.float64],
-    mass: npt.NDArray[np.float64],
-    air_temperature: npt.NDArray[np.float64],
+    alt_ft: npt.NDArray[np.floating],
+    mass: npt.NDArray[np.floating],
+    air_temperature: npt.NDArray[np.floating],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
 ) -> tuple[
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
+    npt.NDArray[np.floating],
+    npt.NDArray[np.floating],
+    npt.NDArray[np.floating],
     npt.NDArray[np.bool_],
 ]:
     """Evaluate instantaneous climb performance at a single point.
@@ -139,15 +140,15 @@ def climb_performance(
 
 
 def compute_climb_segment(
-    src_alt_ft: npt.NDArray[np.float64],
-    dst_alt_ft: npt.NDArray[np.float64],
-    src_mass: npt.NDArray[np.float64],
+    src_alt_ft: npt.NDArray[np.floating],
+    dst_alt_ft: npt.NDArray[np.floating],
+    src_mass: npt.NDArray[np.floating],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
 ) -> tuple[
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
+    npt.NDArray[np.floating],
+    npt.NDArray[np.floating],
+    npt.NDArray[np.floating],
+    npt.NDArray[np.floating],
     npt.NDArray[np.bool_],
 ]:
     """Integrate climb from ``src_alt_ft`` to ``dst_alt_ft`` in 1000 ft steps.
@@ -170,9 +171,9 @@ def compute_climb_segment(
     alt_ft = src_alt_ft.copy()
     mass = src_mass.copy()
 
-    total_dist = np.zeros_like(dst_alt_ft, dtype=float)  # m
-    total_fuel = np.zeros_like(dst_alt_ft, dtype=float)  # kg
-    total_time = np.zeros_like(dst_alt_ft, dtype=float)  # s
+    total_dist = np.zeros_like(dst_alt_ft)  # m
+    total_fuel = np.zeros_like(dst_alt_ft)  # kg
+    total_time = np.zeros_like(dst_alt_ft)  # s
     feasible = np.ones_like(dst_alt_ft, dtype=bool)
 
     while True:
@@ -186,11 +187,9 @@ def compute_climb_segment(
         air_temperature = units.m_to_T_isa(units.ft_to_m(mid_alt_ft))
 
         # Values where step_feasible is False do not make sense (negative ROCD, etc.)
-        ff, rocd, tas, step_feasible = climb_performance(
-            mid_alt_ft, mass[active], air_temperature, atyp
-        )
+        ff, rocd, tas, feas = climb_performance(mid_alt_ft, mass[active], air_temperature, atyp)
 
-        feasible[active] &= step_feasible
+        feasible[active] &= feas
 
         dt_s = step / rocd * 60.0
         total_dist[active] += tas * dt_s
@@ -223,7 +222,7 @@ def climb_to_target(
     - climb time in s
     - mass after climb in kg
 
-    Raises AssertionError if ROCD drops below the threshold at any step.
+    Raises ValueError if ROCD drops below the threshold at any step.
     """
     # Build altitude bands and use the mid-point of each band for calculations.
     band_edges = np.arange(ground_alt_ft, target_alt_ft + 1000.0, 1000.0)
@@ -303,7 +302,8 @@ def climb_to_target(
 
         dh_dt = tas[i] * (c_t_climb[i] - c_drag) / c_lift
         rocd = units.m_to_ft(dh_dt) * 60.0
-        assert rocd > ROCD_CLIMB_THRESHOLD, f"ROCD {rocd:.0f} ft/min too low"
+        if rocd < ROCD_CLIMB_THRESHOLD:
+            raise ValueError(f"ROCD {rocd:.0f} ft/min below threshold at {mid_alt_ft[i]:.0f} ft")
 
         dt_s = (steps[i] / rocd) * 60.0
         total_dist += tas[i] * dt_s
@@ -311,7 +311,7 @@ def climb_to_target(
         total_time += dt_s
         mass -= ff[i] * dt_s
 
-    return total_dist, total_fuel, total_time, mass
+    return float(total_dist), float(total_fuel), float(total_time), float(mass)
 
 
 class DescentTable:
@@ -321,7 +321,7 @@ class DescentTable:
     DESCENT_ANGLE_DEG = 3.0
 
     def __init__(self, atyp: ps_aircraft_params.PSAircraftEngineParams):
-        band_edges = np.arange(0, self.MAX_ALT_FT + 1000.0, 1000.0, dtype=float)
+        band_edges = np.arange(0, self.MAX_ALT_FT + 1000.0, 1000.0, dtype=np.float32)
         band_mids = band_edges[:-1] + 500.0
         air_pressure = units.ft_to_pl(band_mids) * 100.0
         T_isa = units.m_to_T_isa(units.ft_to_m(band_mids))
@@ -330,7 +330,7 @@ class DescentTable:
             band_mids,
             air_pressure,
             atyp.max_mach_num,
-            atyp.p_i_max,
+            np.float32(atyp.p_i_max),  # avoid promotion
             atyp.p_inf_co,
             atm_speed_limit=True,
             buffer=0.0,
@@ -338,34 +338,32 @@ class DescentTable:
         mach = np.minimum(atyp.m_des, mach_lim)
         tas = units.mach_number_to_tas(mach, T_isa)
 
-        self._band_dist = units.ft_to_m(1000.0) / np.tan(np.deg2rad(self.DESCENT_ANGLE_DEG))
+        self._band_dist = units.ft_to_m(1000.0) / np.tan(np.deg2rad(self.DESCENT_ANGLE_DEG)).item()
         band_time = self._band_dist / tas
 
-        self._cum_time = np.zeros(len(band_edges))
+        self._cum_time = np.zeros_like(band_edges)
         np.cumsum(band_time, out=self._cum_time[1:])
 
     def __call__(
         self,
-        src_alt_ft: npt.NDArray[np.float64],
-        dst_alt_ft: npt.NDArray[np.float64],
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        src_alt_ft: npt.NDArray[np.floating],
+        dst_alt_ft: npt.NDArray[np.floating],
+    ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
         """Look up descent distance and time from ``src_alt_ft`` to ``dst_alt_ft``.
 
-        Return a tuple of:
+        Return a tuple of float32 arrays:
         - descent distance in m
         - descent time in s
 
         If ``src_alt_ft <= dst_alt_ft``, returns (0.0, 0.0) for that entry.
         """
-        src_alt_ft, dst_alt_ft = np.broadcast_arrays(src_alt_ft, dst_alt_ft)
-
         src_idx = np.round(src_alt_ft / 1000.0).astype(int)
         dst_idx = np.round(dst_alt_ft / 1000.0).astype(int)
         np.clip(src_idx, 0, len(self._cum_time) - 1, out=src_idx)
         np.clip(dst_idx, 0, len(self._cum_time) - 1, out=dst_idx)
 
         filt = src_idx > dst_idx
-        n_bands = src_idx - dst_idx
+        n_bands = (src_idx - dst_idx).astype(np.float32)  # avoid auto promotion to float64
         descent_dist = np.where(filt, n_bands * self._band_dist, 0.0)
         descent_time = np.where(filt, self._cum_time[src_idx] - self._cum_time[dst_idx], 0.0)
 
