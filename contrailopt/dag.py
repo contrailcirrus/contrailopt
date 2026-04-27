@@ -2,20 +2,26 @@
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
+from pycontrails import MetDataset
 from pycontrails.core import airports
 from pycontrails.physics import geo, units
 
-from contrailopt.slerp import gc_interp, gc_npts, spherical_azimuth, spherical_fwd
+from contrailopt.slerp import gc_interp, gc_npts, spherical_fwd
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
 class AirportCoords:
+    """Coordinates and elevation of an airport, identified by ICAO code."""
+
     icao_code: str
     longitude: float
     latitude: float
@@ -23,6 +29,7 @@ class AirportCoords:
 
     @classmethod
     def from_icao(cls, icao_code: str) -> Self:
+        """Look up airport coordinates by ICAO code."""
         airports_df = airports.global_airport_database()
 
         row = airports_df.query(f"icao_code == '{icao_code}'")
@@ -38,6 +45,7 @@ class AirportCoords:
 
     @property
     def coords(self) -> tuple[float, float]:
+        """Return (longitude, latitude) coordinates as a tuple."""
         return self.longitude, self.latitude
 
 
@@ -165,9 +173,6 @@ class HorizontalDAG:
         """Return neighbors (duplicates included with multiplicity) for a batch of nodes."""
         return _neighbors_batch(self.adj_ptr, self.adj, nodes)
 
-    def edge_distances(self, i: int) -> npt.NDArray[np.float64]:
-        return self.edge_dist[self.adj_ptr[i] : self.adj_ptr[i + 1]]
-
     def expand_neighbors(
         self, nodes: npt.NDArray[np.int64]
     ) -> tuple[
@@ -259,20 +264,31 @@ class HorizontalDAG:
         )
 
     def sample_edges(
-        self, spacing_m: float = 20_000.0
+        self, spacing_m: float
     ) -> tuple[
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
         npt.NDArray[np.int64],
         npt.NDArray[np.int64],
     ]:
-        """Sample points along every edge at roughly ``spacing_m`` meter intervals.
+        """Sample points along every edge at most ``spacing_m`` meters apart.
 
-        Returns (sample_lon, sample_lat, edge_idx, edge_ptr) where:
-        - sample_lon, sample_lat: flat arrays of all sample coordinates.
-        - edge_idx: edge index for each sample point.
-        - edge_ptr: CSR-style pointer so edge i's samples are at
-          sample_lon[edge_ptr[i]:edge_ptr[i+1]].
+        Points are uniformly spaced along each edge, and both edge endpoints
+        (source and destination nodes) are included as samples.
+
+        Returns
+        -------
+        sample_lon : npt.NDArray[np.float64]
+            ``(s,)`` longitude of each sample point.
+        sample_lat : npt.NDArray[np.float64]
+            ``(s,)`` latitude of each sample point.
+        edge_idx : npt.NDArray[np.int64]
+            ``(s,)`` edge index for each sample point.
+        edge_ptr : npt.NDArray[np.int64]
+            ``(m + 1,)`` CSR-style pointer so edge ``i``'s samples are at
+            ``sample_lon[edge_ptr[i]: edge_ptr[i+1]]``.
+
+        Here ``s = edge_ptr[-1]``, the total number of sample points across all edges.
         """
         src = self.edge_src
         src_lon = self.lon[src]
@@ -295,13 +311,13 @@ class HorizontalDAG:
             np.repeat(src_lat, n_samples),
             np.repeat(dst_lon, n_samples),
             np.repeat(dst_lat, n_samples),
-            frac,
+            frac.astype(src_lon.dtype),
         )
 
         edge_idx = np.repeat(np.arange(self.n_edges), n_samples)
         return sample_lon, sample_lat, edge_idx, edge_ptr
 
-    def plot(self, ax=None) -> "matplotlib.axes.Axes":
+    def plot(self, ax: "Axes | None" = None) -> "Axes":
         """Plot the DAG on a cartopy map."""
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
@@ -360,8 +376,8 @@ class HorizontalDAG:
     @classmethod
     def from_points(
         cls,
-        lon: npt.NDArray[np.float64],
-        lat: npt.NDArray[np.float64],
+        lon: npt.NDArray[np.floating],
+        lat: npt.NDArray[np.floating],
         origin_idx: int = 0,
         dest_idx: int = -1,
         max_angle_deg: float = 40.0,
@@ -397,11 +413,12 @@ class HorizontalDAG:
         max_cross_track: float | None = None,
         max_angle_deg: float = 40.0,
         max_dist_m: float = 500_000.0,
+        dtype: np.dtype = np.float64,
     ) -> Self:
         """Build a DAG from Poisson-disk sampled points along the OD great circle."""
         from scipy.stats.qmc import PoissonDisk
 
-        gs_distance = geo.haversine(origin_lon, origin_lat, dest_lon, dest_lat)
+        gs_distance = geo.haversine(origin_lon, origin_lat, dest_lon, dest_lat).item()
 
         if max_cross_track is None:
             max_cross_track = min(1_000_000.0, gs_distance / 4.0)
@@ -605,12 +622,12 @@ def _dual_az_edges(
     tail, head = np.nonzero((dist > 0.0) & (dist <= max_dist_m))
 
     # Precompute per-node azimuths from each node to dest and origin
-    az_to_dest = spherical_azimuth(lon, lat, lon[dest_idx], lat[dest_idx])
-    az_to_origin = spherical_azimuth(lon, lat, lon[origin_idx], lat[origin_idx])
+    az_to_dest = geo.azimuth(lon, lat, lon[dest_idx], lat[dest_idx])
+    az_to_origin = geo.azimuth(lon, lat, lon[origin_idx], lat[origin_idx])
 
     # Compute azimuths for all candidate edges
-    az_at_tail = spherical_azimuth(lon[tail], lat[tail], lon[head], lat[head])
-    at_at_head = spherical_azimuth(lon[head], lat[head], lon[tail], lat[tail])
+    az_at_tail = geo.azimuth(lon[tail], lat[tail], lon[head], lat[head])
+    at_at_head = geo.azimuth(lon[head], lat[head], lon[tail], lat[tail])
 
     # Compute delta angles for azimuth(tail -> head) vs azimuth(tail -> dest)
     # and for azimuth(head -> tail) vs azimuth(head -> origin)
