@@ -4,7 +4,7 @@ import io
 import pathlib
 import re
 import zipfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import platformdirs
@@ -31,7 +31,7 @@ def _latest_subscription_zip_url() -> str:
     if not dates:
         raise ValueError("Could not find NASR subscription effective dates on the FAA page.")
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     current_or_past = [d for d in dates if d <= today]
     effective_date = max(current_or_past) if current_or_past else max(dates)
 
@@ -44,8 +44,8 @@ def _latest_subscription_zip_url() -> str:
 def _cache_is_fresh(cache_path: pathlib.Path) -> bool:
     if not cache_path.exists():
         return False
-    modified_at = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=timezone.utc)
-    return (datetime.now(timezone.utc) - modified_at) <= CACHE_MAX_AGE
+    modified_at = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=UTC)
+    return (datetime.now(UTC) - modified_at) <= CACHE_MAX_AGE
 
 
 def _read_cached_waypoints(refresh_cache: bool) -> pd.DataFrame | None:
@@ -91,7 +91,8 @@ def _load_waypoints_from_zip_bytes(zip_bytes: bytes) -> pd.DataFrame:
             return (
                 pd.read_csv(fix_csv_file, usecols=usecols)
                 .query(
-                    "CHARTS.str.contains('ENROUTE HIGH') and FIX_USE_CODE.str.strip() in ('WP', 'RP', 'NRS')"
+                    "CHARTS.str.contains('ENROUTE HIGH') and "
+                    "FIX_USE_CODE.str.strip() in ('WP', 'RP', 'NRS')"
                 )
                 .dropna(subset="ARTCC_ID_HIGH")[list(rename)]
                 .rename(columns=rename)
