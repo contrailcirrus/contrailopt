@@ -431,26 +431,26 @@ class HorizontalDAG:
         gc_lats = np.concatenate([[origin_lat], gc_lats, [dest_lat]])
 
         # Perpendicular azimuths along spine
-        az_fwd = spherical_azimuth(gc_lons[:-1], gc_lats[:-1], gc_lons[1:], gc_lats[1:])
+        az_fwd = geo.azimuth(gc_lons[:-1], gc_lats[:-1], gc_lons[1:], gc_lats[1:])
         az_perp = np.empty(nx)
         az_perp[:-1] = az_fwd + 90.0
         az_perp[-1] = az_perp[-2]
 
         # Poisson disk sampling in [0, 1]^2
-        sampler = PoissonDisk(d=2, radius=poisson_radius)
-        pts = sampler.fill_space()
+        poisson_disk = PoissonDisk(d=2, radius=poisson_radius)
+        pts = poisson_disk.fill_space()
         t = pts[:, 0]
         cross = pts[:, 1] * 2.0 * max_cross_track - max_cross_track
 
         # Prepend origin and append dest
         t = np.concatenate([[0.0], t, [1.0]])
-        cross = np.concatenate([[0.0], cross, [0.0]])
+        cross = np.concatenate([[0.0], cross, [0.0]], dtype=dtype)
 
         # Project to (lon, lat)
         t_gc = np.linspace(0.0, 1.0, nx)
-        lon_base = np.interp(t, t_gc, gc_lons)
-        lat_base = np.interp(t, t_gc, gc_lats)
-        az_base = np.interp(t, t_gc, az_perp)
+        lon_base = np.interp(t, t_gc, gc_lons).astype(dtype)
+        lat_base = np.interp(t, t_gc, gc_lats).astype(dtype)
+        az_base = np.interp(t, t_gc, az_perp).astype(dtype)
         lon, lat = spherical_fwd(lon_base, lat_base, az_base, cross)
 
         return cls.from_points(
@@ -486,112 +486,209 @@ class HorizontalDAG:
 
 
 @dataclass(kw_only=True, slots=True)
+class EdgeInterpolation:
+    """Met fields interpolated at sample points."""
+
+    air_temperature: npt.NDArray[np.floating]
+    eastward_wind: npt.NDArray[np.floating]
+    northward_wind: npt.NDArray[np.floating]
+
+
+@dataclass(kw_only=True, slots=True)
 class EdgeMetLookup:
-    """Pre-interpolated met data on edge sample points.
+    """Pre-interpolated met data on edge sample points."""
 
-    Attributes:
-        ds: xr.Dataset with dims (sample, altitude_ft, time) containing
-            weather variables interpolated onto edge sample coordinates.
-        edge_ptr: CSR-style pointer array (n_edges + 1,). Samples for edge i
-            are at indices edge_ptr[i]:edge_ptr[i+1].
-        edge_idx: Edge index for each sample point (n_samples,).
-        sample_lon: Longitude of each sample point (n_samples,).
-        sample_lat: Latitude of each sample point (n_samples,).
-        sample_dist: Distance from edge source to each sample point in meters (n_samples,).
-        sample_seg_dist: Distance in meters from this sample to the next (n_samples,).
-            The last sample of each edge has seg_dist = 0.
-    """
-
+    #: ``xr.Dataset`` with dims ``(sample, altitude_ft, time)`` containing
+    #: weather variables interpolated onto edge sample coordinates.
     ds: xr.Dataset
+
+    #: CSR-style pointer array ``(n_edges + 1,)``. Samples for edge ``i``
+    #: are at indices ``edge_ptr[i]:edge_ptr[i+1]``.
     edge_ptr: npt.NDArray[np.int64]
+
+    #: Edge index for each sample point ``(n_samples,)``.
     edge_idx: npt.NDArray[np.int64]
-    sample_lon: npt.NDArray[np.float64]
-    sample_lat: npt.NDArray[np.float64]
-    sample_dist: npt.NDArray[np.float64]
-    sample_seg_dist: npt.NDArray[np.float64]
 
-    def sel_edge(self, edge_i: int) -> xr.Dataset:
-        """Return met data for all samples along a single edge."""
-        s = self.edge_ptr[edge_i]
-        e = self.edge_ptr[edge_i + 1]
-        return self.ds.isel(sample=slice(s, e))
+    #: Longitude of each sample point ``(n_samples,)``.
+    sample_lon: npt.NDArray[np.floating]
 
-    def sel_edges(self, edge_indices: npt.NDArray[np.int64]) -> list[xr.Dataset]:
-        """Return met data slices for a batch of edges."""
-        return [self.sel_edge(i) for i in edge_indices]
+    #: Latitude of each sample point ``(n_samples,)``.
+    sample_lat: npt.NDArray[np.floating]
 
+    #: Cumulative distance from edge source to each sample point in meters ``(n_samples,)``.
+    cum_dist: npt.NDArray[np.floating]
 
-def preinterp_met(
-    ds: xr.Dataset,
-    dag: HorizontalDAG,
-    fl_choices: npt.NDArray[np.float64],
-    takeoff_time: pd.Timestamp,
-    flight_hours: int,
-    spacing_m: float,
-) -> EdgeMetLookup:
-    """Interpolate met data onto edge sample points.
+    #: Distance in meters from this sample to the next ``(n_samples,)``.
+    #: The last sample of each edge has ``delta_dist = 0``.
+    #: Equal to ``diff(cum_dist)`` within each edge.
+    delta_dist: npt.NDArray[np.floating]
 
-    Parameters:
-        met: Gridded meteorological dataset with pycontrails conventions.
-        dag: Horizontal DAG whose edges will be sampled.
-        fl_choices: Flight level altitudes in feet to interpolate onto.
-        takeoff_time: Departure time.
-        flight_hours: Number of hourly time steps to retain.
-        spacing_m: Approximate spacing in meters between sample points along edges.
+    #: Azimuth in radians from each sample to the next ``(n_samples,)``.
+    #: The last sample of each edge copies the previous sample's azimuth.
+    sample_azimuth: npt.NDArray[np.floating]
 
-    Returns:
-        EdgeMetLookup with weather interpolated onto (sample, altitude_ft, time).
-    """
-    sample_lon, sample_lat, edge_idx, edge_ptr = dag.sample_edges(spacing_m=spacing_m)
+    def __post_init__(self) -> None:
+        required = {"air_temperature", "eastward_wind", "northward_wind"}
+        missing = required - set(self.ds)
+        if missing:
+            raise ValueError(f"Met dataset missing required variables: {missing}")
 
-    # Compute cumulative distance from edge source per sample
-    edge_src = dag.edge_src[edge_idx]
-    src_lon = dag.lon[edge_src]
-    src_lat = dag.lat[edge_src]
-    sample_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
-    sample_dist[edge_ptr[:-1]] = 0.0
+    def __repr__(self) -> str:
+        n_samples = len(self.edge_idx)
+        n_edges = len(self.edge_ptr) - 1
+        n_fl = self.ds.sizes["altitude_ft"]
+        n_time = self.ds.sizes["time"]
+        name = type(self).__name__
+        return f"{name}({n_edges} edges, {n_samples} samples, {n_fl} FLs, {n_time} time steps)"
 
-    # Per-sample segment distance to next sample
-    next_lon = np.roll(sample_lon, -1)
-    next_lat = np.roll(sample_lat, -1)
-    sample_seg_dist = geo.haversine(sample_lon, sample_lat, next_lon, next_lat)
-    last = edge_ptr[1:] - 1
-    sample_seg_dist[last] = 0.0
+    def __call__(
+        self,
+        sample_idxs: npt.NDArray[np.int64],
+        times: npt.NDArray[np.datetime64],
+    ) -> EdgeInterpolation:
+        """Interpolate all variables at given sample indices and times.
 
-    # Downselect met in time, this will error if not all times are available
-    times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
-    ds = ds.sel(time=times)
+        Parameters
+        ----------
+        sample_idxs : npt.NDArray[np.int64]
+            1D array of sample indices to query.
+        times : npt.NDArray[np.datetime64]
+            2D array of time coordinates with shape ``(n_sample, n_fl)``, where
+            ``n_sample = len(sample_idxs)``. Each FL gets its own query time
+            (e.g. to account for FL-dependent climb duration).
 
-    # Convert to altitude_ft coordinates
-    altitude_ft = units.pl_to_ft(ds["level"])
-    ds = ds.assign_coords(altitude_ft=altitude_ft).swap_dims(level="altitude_ft")
+        Returns
+        -------
+        EdgeInterpolation
+            Interpolated met fields at the requested sample and time coordinates,
+            each with shape ``(n_sample, n_fl)``.
+        """
+        time_coords = self.ds["time"].values  # (n_time,) datetime64[ns]
+        time_s = (time_coords - time_coords[0]) / np.timedelta64(1, "s")
+        query_s = (times - time_coords[0]) / np.timedelta64(1, "s")
 
-    # Interpolate horizontally onto sample points and vertically onto FL choices
-    ds = ds.interp(
-        altitude_ft=fl_choices,
-        longitude=xr.DataArray(sample_lon, dims="sample"),
-        latitude=xr.DataArray(sample_lat, dims="sample"),
-    )
+        n_time = len(time_coords)
+        fp = np.arange(n_time, dtype=np.float64)
+        t_frac = np.interp(query_s, time_s, fp).astype(np.float32)  # np.interp returns float64
+        if np.any(~np.isfinite(t_frac)):  # idiot check
+            raise RuntimeError("Non-finite t_frac values")
 
-    return EdgeMetLookup(
-        ds=ds,
-        edge_ptr=edge_ptr,
-        edge_idx=edge_idx,
-        sample_lon=sample_lon,
-        sample_lat=sample_lat,
-        sample_dist=sample_dist,
-        sample_seg_dist=sample_seg_dist,
-    )
+        t_lo = np.floor(t_frac).astype(np.int16)  # n_time << int16.max, and f32 + int16 = f32
+        t_hi = np.minimum(t_lo + 1, n_time - 1)
+        w = t_frac - t_lo
+
+        def _lerp(name: str) -> npt.NDArray[np.floating]:
+            data = self.ds[name].values  # (n_total_samples, n_fl, n_time)
+            fl_idx = np.arange(data.shape[1])
+            lo = data[sample_idxs[:, np.newaxis], fl_idx[np.newaxis, :], t_lo]
+            hi = data[sample_idxs[:, np.newaxis], fl_idx[np.newaxis, :], t_hi]
+            return lo + w * (hi - lo)
+
+        return EdgeInterpolation(
+            air_temperature=_lerp("air_temperature"),
+            eastward_wind=_lerp("eastward_wind"),
+            northward_wind=_lerp("northward_wind"),
+        )
+
+    @classmethod
+    def from_met(
+        cls,
+        met: MetDataset,
+        dag: HorizontalDAG,
+        altitude_ft: npt.NDArray[np.float64],
+        takeoff_time: pd.Timestamp,
+        flight_hours: int,
+        spacing_m: float,
+    ) -> Self:
+        """Interpolate met data onto ``dag`` edge sample points.
+
+        Parameters
+        ----------
+        met : MetDataset
+            Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind"
+        dag : HorizontalDAG
+            Horizontal DAG whose edges will be sampled.
+        altitude_ft : npt.NDArray[np.float64]
+            An array of altitudes in feet to interpolate onto.
+        takeoff_time : pd.Timestamp
+            Departure time for the flight, used to select met time steps.
+        flight_hours : int
+            Number of hourly time steps to retain starting from takeoff_time.
+        spacing_m : float
+            Spacing in meters between sample points along edges. Passed to ``dag.sample_edges``.
+
+        Returns
+        -------
+        EdgeMetLookup
+            EdgeMetLookup with weather interpolated onto ``(sample, altitude_ft, time)`` dims.
+
+        """
+        sample_lon, sample_lat, edge_idx, edge_ptr = dag.sample_edges(spacing_m=spacing_m)
+
+        # Compute distance from edge source to each sample
+        edge_src = dag.edge_src[edge_idx]
+        src_lon = dag.lon[edge_src]
+        src_lat = dag.lat[edge_src]
+        cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
+        cum_dist[edge_ptr[:-1]] = 0.0  # defensive, not strictly needed
+
+        # Compute distance and azimuth from one sample to the next (used for wind calcs)
+        last = edge_ptr[1:] - 1
+        delta_dist = np.empty_like(cum_dist)
+        delta_dist[:-1] = np.diff(cum_dist)
+        delta_dist[last] = 0.0
+        sample_azimuth = np.empty_like(cum_dist)
+        sample_azimuth[:-1] = np.deg2rad(
+            geo.azimuth(sample_lon[:-1], sample_lat[:-1], sample_lon[1:], sample_lat[1:])
+        )
+        sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
+
+        # Ensure variables
+        ds = met.data[["air_temperature", "eastward_wind", "northward_wind"]]
+
+        # Downselect met in time, this will error if not all times are available
+        times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
+        ds = ds.sel(time=times)
+
+        # Convert to altitude_ft coordinates
+        ds_altitude_ft = units.pl_to_ft(ds["level"])
+        ds = ds.assign_coords(altitude_ft=ds_altitude_ft).swap_dims(level="altitude_ft")
+
+        # Interpolate horizontally onto sample points and vertically onto FL choices
+        ds = ds.interp(
+            altitude_ft=altitude_ft,
+            longitude=xr.DataArray(sample_lon, dims="sample"),
+            latitude=xr.DataArray(sample_lat, dims="sample"),
+        )
+
+        # Load the data into memory here (we freely access ds.values in __call__)
+        ds.load()
+
+        # Keep the original dtype (interp promotes to float64)
+        # This needs to happen after load because dask doesn't understand interp promotes
+        for var in ds:
+            ds[var] = ds[var].astype(met.data[var].dtype)
+
+        return cls(
+            ds=ds,
+            edge_ptr=edge_ptr,
+            edge_idx=edge_idx,
+            sample_lon=sample_lon,
+            sample_lat=sample_lat,
+            cum_dist=cum_dist,
+            delta_dist=delta_dist,
+            sample_azimuth=sample_azimuth,
+        )
 
 
 def _dual_az_edges(
-    lon: npt.NDArray[np.float64],
-    lat: npt.NDArray[np.float64],
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
     origin_idx: int,
     dest_idx: int,
     max_angle_deg: float = 40.0,
     max_dist_m: float = 500_000.0,
-) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
     """Build directed edges using a dual azimuth constraint.
 
     For each pair of nodes within ``max_dist_m``, the directed edge tail -> head
@@ -607,9 +704,12 @@ def _dual_az_edges(
     football-shaped corridor between origin and destination and guarantee that each
     edge is forward-pointing.
 
-    Returns a tuple of:
-    - edges: (M, 2) int array of [tail, head] index pairs.
-    - edge_dist: (M,) float array of haversine distances in meters.
+    Returns
+    -------
+    edges : npt.NDArray[np.int64]
+        ``(m, 2)`` array of ``[tail, head]`` index pairs.
+    edge_dist : npt.NDArray[np.floating]
+        ``(m,)`` haversine distances in meters. The dtype matches the input lon/lat dtype.
     """
     # Build 2d array of all candidate pairs within distance threshold
     # If this gets expensive, we could use a KDTree approach instead
