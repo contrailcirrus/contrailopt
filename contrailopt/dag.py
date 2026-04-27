@@ -8,7 +8,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
-from pycontrails import MetDataset
+from pycontrails import Flight, MetDataset
 from pycontrails.core import airports
 from pycontrails.physics import geo, units
 
@@ -460,6 +460,67 @@ class HorizontalDAG:
             dest_idx=len(lon) - 1,
             max_angle_deg=max_angle_deg,
             max_dist_m=max_dist_m,
+        )
+
+    @classmethod
+    def from_flight(
+        cls,
+        flight: Flight,
+        max_dist_m: float = 500_000.0,
+    ) -> Self:
+        """Build a DAG from a ``pycontrails.Flight`` trajectory.
+
+        Waypoint *i* is connected to waypoint *j* iff *j* is strictly forward
+        in time and within ``max_dist_m`` great-circle distance of *i*.
+
+        Parameters
+        ----------
+        flight : Flight
+            A flight trajectory with longitude, latitude, and time columns.
+        max_dist_m : float
+            Maximum great-circle distance in meters for an edge.
+
+        Returns
+        -------
+        HorizontalDAG
+            A DAG whose nodes are the flight waypoints, with the first
+            waypoint as origin and the last as destination.
+        """
+        lon = flight["longitude"]
+        lat = flight["latitude"]
+        time = flight["time"]
+        n = len(lon)
+
+        # Compute full 2D pairwise distance matrix, could be smarter here if needed
+        dist = geo.haversine(
+            lon[:, np.newaxis],
+            lat[:, np.newaxis],
+            lon[np.newaxis, :],
+            lat[np.newaxis, :],
+        )
+
+        dist_filt = dist <= max_dist_m
+        time_filt = time[np.newaxis, :] > time[:, np.newaxis]
+        tail, head = np.nonzero(dist_filt & time_filt)
+
+        edge_dist = dist[tail, head]
+        order = np.argsort(tail)
+        tail = tail[order]
+        head = head[order]
+        edge_dist = edge_dist[order]
+
+        adj_ptr = np.zeros(n + 1, dtype=np.int64)
+        np.add.at(adj_ptr[1:], tail, 1)
+        np.cumsum(adj_ptr, out=adj_ptr)
+
+        return cls(
+            lon=lon,
+            lat=lat,
+            adj_ptr=adj_ptr,
+            adj=head,
+            edge_dist=edge_dist,
+            h_origin=0,
+            h_dest=n - 1,
         )
 
     def topo_wavefronts(self) -> Generator[npt.NDArray[np.int64], None, None]:
