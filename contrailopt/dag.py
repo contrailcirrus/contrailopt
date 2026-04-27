@@ -47,7 +47,7 @@ def _csr_flat_pos(
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Return flat indices into CSR data arrays for a batch of row nodes.
 
-    Returns ``(flat_pos, lengths)`` where flat_pos indexes into adj/edge_dist
+    Returns ``(flat_pos, lengths)``, where flat_pos indexes into adj
     and lengths[i] is the number of entries for nodes[i].
     """
     starts = adj_ptr[nodes]
@@ -74,7 +74,7 @@ def _reachability(
     adj_ptr: npt.NDArray[np.int64],
     adj: npt.NDArray[np.int64],
 ) -> npt.NDArray[np.bool_]:
-    """Return boolean array of nodes reachable from seed via batch_neighbors."""
+    """Return boolean array of nodes reachable from seed via adjacency."""
     seen = np.zeros(n_nodes, dtype=bool)
     frontier = np.array([seed], dtype=np.int64)
     seen[frontier] = True
@@ -91,32 +91,46 @@ def _reachability(
 def _reverse_csr(
     adj: npt.NDArray[np.int64],
     n_nodes: int,
-    src: npt.NDArray[np.int64],
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-    """Compute reverse (dst -> src) CSR representation."""
+    """Compute reverse CSR pointer and edge permutation order."""
     order = np.argsort(adj)
 
     rev_ptr = np.zeros(n_nodes + 1, dtype=np.int64)
     np.add.at(rev_ptr[1:], adj, 1)
     np.cumsum(rev_ptr, out=rev_ptr)
 
-    return rev_ptr, src[order]
+    return rev_ptr, order
 
 
 @dataclass(kw_only=True, slots=True)
 class HorizontalDAG:
     """Directed graph on (lon, lat) nodes with CSR adjacency."""
 
-    lon: npt.NDArray[np.float64]  # (N,)
-    lat: npt.NDArray[np.float64]  # (N,)
-    adj_ptr: npt.NDArray[np.int64]  # (N + 1,) CSR row pointers
-    adj: npt.NDArray[np.int64]  # (M,) neighbor indices, the destinations of directed edges
-    edge_dist: npt.NDArray[np.float64]  # (M,) great-circle distance per edge in meters
-    h_origin: int  # index of the distinguished origin node
-    h_dest: int  # index of the distinguished destination node
+    #: Longitude of each node in degrees ``(n,)``.
+    lon: npt.NDArray[np.float64]
+
+    #: Latitude of each node in degrees ``(n,)``.
+    lat: npt.NDArray[np.float64]
+
+    #: CSR row pointers ``(n + 1,)``.
+    #: Neighbors of node ``i`` are ``adj[adj_ptr[i]: adj_ptr[i+1]]``.
+    adj_ptr: npt.NDArray[np.int64]
+
+    #: Neighbor (destination) indices for each directed edge ``(m,)``.
+    adj: npt.NDArray[np.int64]
+
+    #: Great-circle distance in meters for each directed edge ``(m,)``.
+    edge_dist: npt.NDArray[np.float64]
+
+    #: Index of the distinguished origin node.
+    h_origin: int
+
+    #: Index of the distinguished destination node.
+    h_dest: int
 
     def __repr__(self) -> str:
-        return f"HorizontalDAG({self.n_nodes} nodes, {self.n_edges} edges)"
+        name = type(self).__name__
+        return f"{name}({self.n_nodes} nodes, {self.n_edges} edges)"
 
     @property
     def n_nodes(self) -> int:
@@ -140,7 +154,7 @@ class HorizontalDAG:
 
     @property
     def edges(self) -> npt.NDArray[np.int64]:
-        """The directed edges of the graph as (src, dest) index pairs in an ``(M, 2)`` array."""
+        """The directed edges of the graph as (src, dest) index pairs in an ``(m, 2)`` array."""
         return np.column_stack([self.edge_src, self.adj])
 
     def neighbors(self, i: int) -> npt.NDArray[np.int64]:
@@ -164,18 +178,20 @@ class HorizontalDAG:
     ]:
         """Expand CSR adjacency for a batch of nodes into flat edge arrays.
 
-        Generalizes :meth:`neighbors_batch` by also returning edge distances,
-        a source-index mapping, and the raw CSR edge indices.
+        Returns
+        -------
+        flat_nbr : npt.NDArray[np.int64]
+            ``(e,)`` neighbor indices for all edges leaving ``nodes``.
+        flat_dist : npt.NDArray[np.float64]
+            ``(e,)`` edge distances in meters.
+        src_idx : npt.NDArray[np.int64]
+            ``(e,)`` index into ``nodes`` for each flat entry, so
+            ``nodes[src_idx[k]]`` is the source node of flat edge ``k``.
+        flat_edge_idx : npt.NDArray[np.int64]
+            ``(e,)`` index of each edge in the CSR arrays (``adj``, ``edge_dist``).
 
-        Returns ``(flat_nbr, flat_dist, src_idx, flat_edge_idx)`` where:
-        - flat_nbr: (F,) neighbor indices for all edges leaving nodes.
-        - flat_dist: (F,) edge distances in meters for those edges.
-        - src_idx: (F,) index into nodes for each flat entry, so
-          ``nodes[src_idx[k]]`` is the source node of flat edge k.
-        - flat_edge_idx: (F,) index of each edge in the CSR arrays (adj, edge_dist).
-
-        Here F is the total number of outgoing edges from all ``nodes`` (with multiplicity,
-        since the same neighbor can appear via different source nodes).
+        Here ``e = out_degree[nodes].sum()``, the total number of outgoing
+        edges from all ``nodes``.
         """
         flat_pos, lengths = _csr_flat_pos(self.adj_ptr, nodes)
         src_idx = np.repeat(np.arange(len(nodes)), lengths)
@@ -187,12 +203,33 @@ class HorizontalDAG:
         matrix[self.edge_src, self.adj] = True
         return matrix
 
+    def reverse(self) -> Self:
+        """Return a new DAG with all edge directions flipped and origin/dest swapped."""
+        src = self.edge_src
+        rev_ptr, rev_order = _reverse_csr(self.adj, self.n_nodes)
+
+        rev_adj = src[rev_order]
+        rev_edge_dist = self.edge_dist[rev_order]
+
+        return type(self)(
+            lon=self.lon,
+            lat=self.lat,
+            adj_ptr=rev_ptr,
+            adj=rev_adj,
+            edge_dist=rev_edge_dist,
+            h_origin=self.h_dest,
+            h_dest=self.h_origin,
+        )
+
     def prune(self) -> Self:
         """Return a new DAG with only nodes reachable from origin that also reach dest."""
         src = self.edge_src
         fwd = _reachability(self.h_origin, self.n_nodes, self.adj_ptr, self.adj)
-        rev_ptr, rev_adj = _reverse_csr(self.adj, self.n_nodes, src)
+
+        rev_ptr, rev_order = _reverse_csr(self.adj, self.n_nodes)
+        rev_adj = src[rev_order]
         bwd = _reachability(self.h_dest, self.n_nodes, rev_ptr, rev_adj)
+
         live = fwd & bwd
 
         # Remap node indices
