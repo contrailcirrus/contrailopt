@@ -222,6 +222,38 @@ class TestSampleEdges:
             assert n_per_edge[long_edges].mean() > n_per_edge[short_edges].mean()
 
 
+class TestExcludePolygons:
+    def test_blocks_upper_path(self, diamond: HorizontalDAG) -> None:
+        # Node 1 is at (-78, 40.1). Block a box around it.
+        polygon = [(-78.5, 40.05), (-77.5, 40.05), (-77.5, 40.5), (-78.5, 40.5)]
+        result = diamond.exclude_polygons([polygon])
+
+        # Only 0->2 and 2->3 survive
+        assert result.n_edges == 2
+        assert result.n_nodes == 3
+
+    def test_blocks_all_paths(self, diamond: HorizontalDAG) -> None:
+        polygon = [(-81, 39), (-75, 39), (-75, 41), (-81, 41)]
+        result = diamond.exclude_polygons([polygon])
+        assert result.n_edges == 0
+        assert result.n_nodes == 0
+
+    def test_polygon_blocks_edges(self, lattice: HorizontalDAG) -> None:
+        pruned = lattice.prune()
+
+        # Block a small region that doesn't sever the graph
+        polygon = [(49, 2), (51, 2), (51, 5), (49, 5)]
+        restricted = pruned.exclude_polygons([polygon])
+
+        assert 0 < restricted.n_edges < pruned.n_edges
+        assert 0 < restricted.n_nodes < pruned.n_nodes
+
+    def test_empty_polygon_list_is_noop(self, diamond: HorizontalDAG) -> None:
+        result = diamond.exclude_polygons([])
+        assert result.n_nodes == diamond.n_nodes
+        assert result.n_edges == diamond.n_edges
+
+
 class TestFromPoisson:
     def test_builds_connected_dag(self) -> None:
         dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune()

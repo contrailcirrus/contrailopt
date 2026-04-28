@@ -10,6 +10,7 @@ dependencies = [
     "platformdirs",
     "pycontrails",
     "requests",
+    "spherely",
 ]
 
 [dependency-groups]

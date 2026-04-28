@@ -112,7 +112,11 @@ def _reverse_csr(
 
 @dataclass(kw_only=True, slots=True)
 class HorizontalDAG:
-    """Directed graph on (lon, lat) nodes with CSR adjacency."""
+    """Directed graph on (lon, lat) nodes with CSR adjacency.
+
+    All geometry (distances, azimuths, interpolation, polygon exclusion) is
+    computed on a sphere, not on a planar lon/lat grid.
+    """
 
     #: Longitude of each node in degrees ``(n,)``.
     lon: npt.NDArray[np.floating]
@@ -263,6 +267,60 @@ class HorizontalDAG:
             h_dest=new_idx[self.h_dest].item(),
         )
 
+    def exclude_polygons(self, polygons: list[list[tuple[float, float]]]) -> Self:
+        """Return a new DAG with edges crossing any polygon removed.
+
+        Uses spherely for geodesic intersection tests on the sphere.
+
+        Parameters
+        ----------
+        polygons : list[list[tuple[float, float]]]
+            List of polygons, where each polygon is a list of ``(lon, lat)`` vertices.
+
+        Returns
+        -------
+        HorizontalDAG
+            A new DAG with offending edges removed and then pruned.
+        """
+        import spherely
+
+        src = self.edge_src
+
+        # Build a linestring for every edge
+        linestrings = [
+            spherely.create_linestring([(self.lon[s], self.lat[s]), (self.lon[d], self.lat[d])])
+            for s, d in zip(src, self.adj, strict=True)
+        ]
+        edge_geoms = np.array(linestrings)
+
+        # Test each polygon against all edges. We could also take a union of all polygons
+        # and test once if this becomes a bottleneck
+        excluded = np.zeros(self.n_edges, dtype=bool)
+        for coords in polygons:
+            poly = spherely.create_polygon(coords)
+            excluded |= spherely.intersects(poly, edge_geoms)
+
+        # Build filtered edge list
+        keep = ~excluded
+        kept_src = src[keep]
+        kept_dst = self.adj[keep]
+        kept_dist = self.edge_dist[keep]
+
+        # Rebuild CSR
+        adj_ptr = np.zeros(self.n_nodes + 1, dtype=np.int64)
+        np.add.at(adj_ptr[1:], kept_src, 1)
+        np.cumsum(adj_ptr, out=adj_ptr)
+
+        return type(self)(
+            lon=self.lon,
+            lat=self.lat,
+            adj_ptr=adj_ptr,
+            adj=kept_dst,
+            edge_dist=kept_dist,
+            h_origin=self.h_origin,
+            h_dest=self.h_dest,
+        ).prune()
+
     def sample_edges(
         self, spacing_m: float
     ) -> tuple[
@@ -348,7 +406,7 @@ class HorizontalDAG:
             ],
             axis=1,
         )
-        lc = LineCollection(segments, colors="steelblue", linewidths=0.3, alpha=0.4, transform=pc)
+        lc = LineCollection(segments, colors="steelblue", linewidths=0.1, alpha=0.2, transform=pc)
         ax.add_collection(lc)
 
         # Draw nodes
