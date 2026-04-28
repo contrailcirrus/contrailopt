@@ -234,9 +234,9 @@ class TestExcludePolygons:
 
     def test_blocks_all_paths(self, diamond: HorizontalDAG) -> None:
         polygon = [(-81, 39), (-75, 39), (-75, 41), (-81, 41)]
-        result = diamond.exclude_polygons([polygon])
-        assert result.n_edges == 0
-        assert result.n_nodes == 0
+
+        with pytest.raises(ValueError, match="unreachable"):
+            diamond.exclude_polygons([polygon])
 
     def test_polygon_blocks_edges(self, lattice: HorizontalDAG) -> None:
         pruned = lattice.prune()
@@ -588,10 +588,8 @@ class TestDisconnectedPrune:
             h_dest=3,
         )
 
-        pruned = dag.prune()
-        # Output is completely empty
-        assert pruned.n_nodes == 0
-        assert pruned.n_edges == 0
+        with pytest.raises(ValueError, match="unreachable"):
+            dag.prune()
 
 
 class TestFromFlight:
@@ -644,5 +642,7 @@ class TestFromFlight:
     def test_small_max_dist_disconnects(self, sample_flight: Flight) -> None:
         dag = HorizontalDAG.from_flight(sample_flight, max_dist_m=1.0)
         assert dag.n_edges == 0
-        pruned = dag.prune()
-        assert pruned.n_nodes == 0
+
+        # Calling prune raises since dest is unreachable
+        with pytest.raises(ValueError, match="unreachable"):
+            dag.prune()

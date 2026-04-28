@@ -241,6 +241,9 @@ class HorizontalDAG:
 
         live = fwd & bwd
 
+        if not live[self.h_origin] or not live[self.h_dest]:
+            raise ValueError("Origin or destination became unreachable after pruning")
+
         # Remap node indices
         n = live.sum()
         new_idx = np.full(self.n_nodes, -1, dtype=np.int64)
