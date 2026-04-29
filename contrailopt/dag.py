@@ -474,7 +474,7 @@ class HorizontalDAG:
         max_cross_track: float | None = None,
         max_angle_deg: float = 40.0,
         max_dist_m: float = 500_000.0,
-        dtype: np.dtype = np.float64,
+        dtype: type[np.floating] = np.float64,
     ) -> Self:
         """Build a DAG from Poisson-disk sampled points along the OD great circle."""
         from scipy.stats.qmc import PoissonDisk
