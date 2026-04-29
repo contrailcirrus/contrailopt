@@ -110,7 +110,7 @@ def _reverse_csr(
     return rev_ptr, order
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass(kw_only=True, slots=True, frozen=True)
 class HorizontalDAG:
     """Directed graph on (lon, lat) nodes with CSR adjacency.
 
@@ -607,7 +607,7 @@ class HorizontalDAG:
             wave_nodes = candidates[filt]
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass(kw_only=True, slots=True, frozen=True)
 class EdgeInterpolation:
     """Met fields interpolated at sample points."""
 
@@ -616,7 +616,7 @@ class EdgeInterpolation:
     northward_wind: npt.NDArray[np.floating]
 
 
-@dataclass(kw_only=True, slots=True)
+@dataclass(kw_only=True, slots=True, frozen=True)
 class EdgeMetLookup:
     """Pre-interpolated met data on edge sample points."""
 
