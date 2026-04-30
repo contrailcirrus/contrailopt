@@ -5,6 +5,7 @@ import types
 import numpy as np
 import pandas as pd
 import pytest
+from pycontrails import Flight
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.models.ps_model.ps_aircraft_params import PSAircraftEngineParams as PSParams
 
@@ -650,3 +651,19 @@ class TestOptimizer:
         opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"), cost_index=60.0)
         opt.solve(n_iter=1, cost_index=120.0, payload=15_000.0)
         assert opt.cost_index == 120.0
+
+    def test_to_flight(self) -> None:
+        """The to_flight returns a Flight with expected structure."""
+        opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"))
+        opt.solve(n_iter=1, payload=15_000.0)
+        fl = opt.to_flight()
+
+        assert isinstance(fl, Flight)
+        assert len(fl) >= 2
+
+        assert "mach_number" in fl
+        assert fl["longitude"][0] == pytest.approx(opt.origin.longitude, abs=0.01)
+        assert fl["latitude"][0] == pytest.approx(opt.origin.latitude, abs=0.01)
+        assert fl["longitude"][-1] == pytest.approx(opt.dest.longitude, abs=0.01)
+        assert fl["latitude"][-1] == pytest.approx(opt.dest.latitude, abs=0.01)
+        assert pd.DatetimeIndex(fl["time"]).is_monotonic_increasing

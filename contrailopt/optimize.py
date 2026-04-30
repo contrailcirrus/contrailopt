@@ -666,6 +666,7 @@ class Optimizer:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         self.takeoff_time = takeoff_time
         self.cost_index = cost_index
+        self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
 
         self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions)
@@ -757,7 +758,7 @@ class Optimizer:
         name = type(self).__name__
         return (
             f"{name}({self.origin.icao_code} -> {self.dest.icao_code}, "
-            f"{self.atyp.aircraft_type}, {self.takeoff_time}, "
+            f"{self.aircraft_type}, {self.takeoff_time}, "
             f"{self.dag.n_nodes} nodes, {met}, {status})"
         )
 
@@ -799,7 +800,7 @@ class Optimizer:
             self.origin.icao_code,
             self.dest.icao_code,
             self.takeoff_time,
-            self.atyp.aircraft_type,
+            self.aircraft_type,
             self.atyp,
         )
         landing_mass = self.atyp.amass_oew + payload + reserve_fuel
@@ -895,6 +896,46 @@ class Optimizer:
             raise RuntimeError("Path reconstruction did not reach origin")
 
         return np.array(path_h), np.array(path_fl_idx), np.array(path_mach)
+
+    def to_flight(self) -> Flight:
+        """Return the optimal trajectory as a `pycontrails.Flight`.
+
+        The ``solve()`` method must be called first.
+
+        Returns
+        -------
+        Flight
+            A Flight with an additional ``mach_number`` column for cruise Mach number on each leg.
+        """
+        path_h, path_fl_idx, mach_number = self.reconstruct_path()
+        state = self.result.state
+        dag = self.dag
+        ground_fi = len(self.fl_choices)
+
+        lon = dag.lon[path_h]
+        lat = dag.lat[path_h]
+
+        altitude_ft = np.where(
+            path_fl_idx == ground_fi,
+            np.where(
+                np.arange(len(path_h)) == 0,
+                self.origin.elevation_ft,
+                self.dest.elevation_ft,
+            ),
+            self.fl_choices[np.clip(path_fl_idx, 0, ground_fi - 1)],
+        )
+
+        elapsed_s = state.best_time[path_h, path_fl_idx]
+        time = self.takeoff_time + pd.to_timedelta(elapsed_s, unit="s")
+
+        return Flight(
+            longitude=lon,
+            latitude=lat,
+            altitude_ft=altitude_ft,
+            time=time,
+            data={"mach_number": mach_number},
+            aircraft_type=self.aircraft_type,
+        )
 
     def animate_solve(self, display_fl_idx: int | None = None) -> "FuncAnimation":
         """Re-run the DP with converged mass and return a wavefront animation.
