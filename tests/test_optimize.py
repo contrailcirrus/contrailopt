@@ -607,6 +607,13 @@ class TestOptimizer:
         assert len(opt.fl_choices) > 0
         assert len(opt.mach_choices) > 0
 
+    def test_init_tz_aware(self) -> None:
+        """Tz-aware takeoff_time is normalized to naive UTC."""
+        t_utc = pd.Timestamp("2024-06-01 12:00", tz="US/Eastern")
+        opt = Optimizer("KJFK", "KBOS", "A320", t_utc)
+        assert opt.takeoff_time.tzinfo is None
+        assert opt.takeoff_time == pd.Timestamp("2024-06-01 16:00")
+
     def test_repr(self) -> None:
         """Repr shows airports and unsolved status."""
         opt = Optimizer("KJFK", "KBOS", "A320", pd.Timestamp("2024-06-01"))
