@@ -795,7 +795,7 @@ class EdgeMetLookup:
             altitude_ft=altitude_ft,
             longitude=xr.DataArray(sample_lon, dims="sample"),
             latitude=xr.DataArray(sample_lat, dims="sample"),
-            **interp_kwargs,
+            kwargs=interp_kwargs,
         )
 
         # Load the data into memory here (we freely access ds.values in __call__)
