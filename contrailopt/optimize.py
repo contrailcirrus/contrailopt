@@ -649,8 +649,8 @@ class Optimizer:
 
     def __init__(
         self,
-        origin_icao: str,
-        dest_icao: str,
+        origin_icao: str | AirportCoords,
+        dest_icao: str | AirportCoords,
         aircraft_type: str,
         takeoff_time: pd.Timestamp,
         *,
@@ -661,8 +661,10 @@ class Optimizer:
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
         **interp_kwargs: Any,
     ) -> None:
-        self.origin = AirportCoords.from_icao(origin_icao)
-        self.dest = AirportCoords.from_icao(dest_icao)
+        self.origin = (
+            AirportCoords.from_icao(origin_icao) if isinstance(origin_icao, str) else origin_icao
+        )
+        self.dest = AirportCoords.from_icao(dest_icao) if isinstance(dest_icao, str) else dest_icao
 
         if takeoff_time.tzinfo:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
