@@ -659,6 +659,9 @@ class Optimizer:
     ) -> None:
         self.origin = AirportCoords.from_icao(origin_icao)
         self.dest = AirportCoords.from_icao(dest_icao)
+
+        if takeoff_time.tzinfo:
+            takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         self.takeoff_time = takeoff_time
         self.cost_index = cost_index
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]

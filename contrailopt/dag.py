@@ -769,6 +769,8 @@ class EdgeMetLookup:
         ds = met.data[["air_temperature", "eastward_wind", "northward_wind"]]
 
         # Downselect met in time, this will error if not all times are available
+        if takeoff_time.tzinfo:
+            takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
         ds = ds.sel(time=times)
 
