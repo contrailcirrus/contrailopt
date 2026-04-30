@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import numpy.typing as npt
@@ -721,6 +721,7 @@ class EdgeMetLookup:
         takeoff_time: pd.Timestamp,
         flight_hours: int,
         spacing_m: float,
+        **interp_kwargs: Any,
     ) -> Self:
         """Interpolate met data onto ``dag`` edge sample points.
 
@@ -738,6 +739,9 @@ class EdgeMetLookup:
             Number of hourly time steps to retain starting from takeoff_time.
         spacing_m : float
             Spacing in meters between sample points along edges. Passed to ``dag.sample_edges``.
+        **interp_kwargs
+            Additional keyword arguments passed to :meth:`xarray.Dataset.interp`
+            (e.g. ``kwargs={"fill_value": None}``).
 
         Returns
         -------
@@ -768,11 +772,19 @@ class EdgeMetLookup:
         # Ensure variables
         ds = met.data[["air_temperature", "eastward_wind", "northward_wind"]]
 
-        # Downselect met in time, this will error if not all times are available
+        # Downselect met in time
         if takeoff_time.tzinfo:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
-        ds = ds.sel(time=times)
+        try:
+            ds = ds.sel(time=times)
+        except KeyError as exc:
+            available = pd.DatetimeIndex(ds["time"].values)  # pd.DatetimeIndex gives nicer message
+            raise ValueError(
+                f"Estimated {flight_hours}h of met data needed to cover takeoff to landing.\n"
+                f"Required: {times[0]} ... {times[-1]}.\n"
+                f"Available: {available[0]} ... {available[-1]}"
+            ) from exc
 
         # Convert to altitude_ft coordinates
         ds_altitude_ft = units.pl_to_ft(ds["level"])
@@ -783,6 +795,7 @@ class EdgeMetLookup:
             altitude_ft=altitude_ft,
             longitude=xr.DataArray(sample_lon, dims="sample"),
             latitude=xr.DataArray(sample_lat, dims="sample"),
+            **interp_kwargs,
         )
 
         # Load the data into memory here (we freely access ds.values in __call__)
