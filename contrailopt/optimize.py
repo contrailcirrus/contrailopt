@@ -549,7 +549,34 @@ def _fl_choices(origin: AirportCoords, dest: AirportCoords) -> npt.NDArray[FLOAT
     az = geo.azimuth(*origin.coords, *dest.coords)
     eastbound = az % 360.0 < 180.0
     start = 29_000.0 if eastbound else 28_000.0
-    return np.arange(start, 44_000.0, 2000.0, dtype=FLOAT_DTYPE)
+    return np.arange(start, 42_000.0, 2000.0, dtype=FLOAT_DTYPE)
+
+
+def cruise_flight_levels(
+    origin_icao: str | AirportCoords,
+    dest_icao: str | AirportCoords,
+) -> npt.NDArray[FLOAT_DTYPE]:
+    """Determine the candidate cruise flight levels for a given origin-destination pair.
+
+    This function applies the common eastbound/westbound FL rules of even FLs for westbound
+    flights and odd FLs for eastbound flights. There is not per-aircraft-type ceiling
+    applied (this could be added if needed).
+
+    Parameters
+    ----------
+    origin_icao : str | AirportCoords
+        ICAO code for the origin airport (e.g. ``"KLAX"``) or pre-fetched coordinates.
+    dest_icao : str | AirportCoords
+        ICAO code for the destination airport or pre-fetched coordinates.
+
+    Returns
+    -------
+    npt.NDArray[FLOAT_DTYPE]
+        Array of candidate cruise flight levels in feet (e.g. ``[29000., 31000., ..., 41000.]``).
+    """
+    origin = AirportCoords.from_icao(origin_icao) if isinstance(origin_icao, str) else origin_icao
+    dest = AirportCoords.from_icao(dest_icao) if isinstance(dest_icao, str) else dest_icao
+    return _fl_choices(origin, dest)
 
 
 def _build_dag(
@@ -639,7 +666,7 @@ class Optimizer:
         self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions)
         self.avoidance_regions = avoidance_regions
 
-        self.fl_choices = _fl_choices(self.origin, self.dest)
+        self.fl_choices = cruise_flight_levels(origin_icao, dest_icao)
         self.mach_choices = np.arange(
             self.atyp.m_des // 0.01 * 0.01 - 0.02,  # floor to 2 decimal places, minus a margin
             self.atyp.max_mach_num + 0.01,

@@ -20,8 +20,8 @@ from contrailopt.optimize import (
     _estimate_mass,
     _estimate_sample_times,
     _expand_edge_samples,
-    _fl_choices,
     _isa_cruise,
+    cruise_flight_levels,
     solve_dag,
 )
 
@@ -548,14 +548,10 @@ class TestEstimateMass:
         assert reserve_fuel > 0.0
 
 
-class TestFlChoices:
+class TestCruiseFlightLevels:
     def test_eastbound(self) -> None:
         """Eastbound flight gets odd FLs starting at FL290."""
-        origin = AirportCoords(
-            icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
-        )
-        dest = AirportCoords(icao_code="EGLL", longitude=-0.46, latitude=51.47, elevation_ft=83.0)
-        fls = _fl_choices(origin, dest)
+        fls = cruise_flight_levels("KJFK", "EGLL")
         assert fls[0] == 29_000.0
         assert np.all(np.diff(fls) == 2000.0)
         assert fls[-1] < 44_000.0
@@ -563,9 +559,7 @@ class TestFlChoices:
 
     def test_westbound(self) -> None:
         """Westbound flight gets even FLs starting at FL280."""
-        origin = AirportCoords(icao_code="EGLL", longitude=-0.46, latitude=51.47, elevation_ft=83.0)
-        dest = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0)
-        fls = _fl_choices(origin, dest)
+        fls = cruise_flight_levels("EGLL", "KJFK")
         assert fls[0] == 28_000.0
         assert np.all(np.diff(fls) == 2000.0)
 
