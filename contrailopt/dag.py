@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 import numpy.typing as npt
@@ -721,7 +721,6 @@ class EdgeMetLookup:
         takeoff_time: pd.Timestamp,
         flight_hours: int,
         spacing_m: float,
-        **interp_kwargs: Any,
     ) -> Self:
         """Interpolate met data onto ``dag`` edge sample points.
 
@@ -739,9 +738,6 @@ class EdgeMetLookup:
             Number of hourly time steps to retain starting from takeoff_time.
         spacing_m : float
             Spacing in meters between sample points along edges. Passed to ``dag.sample_edges``.
-        **interp_kwargs
-            Additional keyword arguments passed to :meth:`xarray.Dataset.interp`
-            (e.g. ``kwargs={"fill_value": None}``).
 
         Returns
         -------
@@ -795,7 +791,6 @@ class EdgeMetLookup:
             altitude_ft=altitude_ft,
             longitude=xr.DataArray(sample_lon, dims="sample"),
             latitude=xr.DataArray(sample_lat, dims="sample"),
-            **interp_kwargs,
         )
 
         # Load the data into memory here (we freely access ds.values in __call__)

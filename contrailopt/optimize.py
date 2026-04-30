@@ -3,7 +3,7 @@
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 import numpy.typing as npt
@@ -642,9 +642,6 @@ class Optimizer:
     avoidance_regions : list of polygon coordinate lists, or None
         Polygons to exclude from the search, defined as lists of ``(lon, lat)`` vertices.
         Edges intersecting any polygon are removed and the DAG is re-pruned.
-    **interp_kwargs
-        Additional keyword arguments passed to :meth:`xarray.Dataset.interp`
-        during met interpolation (e.g. ``kwargs={"fill_value": None}``).
     """
 
     def __init__(
@@ -659,7 +656,6 @@ class Optimizer:
         cost_index: float = 60.0,
         met_spacing_m: float = 20_000.0,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
-        **interp_kwargs: Any,
     ) -> None:
         self.origin = (
             AirportCoords.from_icao(origin_icao) if isinstance(origin_icao, str) else origin_icao
@@ -692,7 +688,6 @@ class Optimizer:
                 takeoff_time=self.takeoff_time,
                 flight_hours=flight_hours,
                 spacing_m=met_spacing_m,
-                **interp_kwargs,
             )
         else:
             self.met_lookup = None
@@ -711,7 +706,6 @@ class Optimizer:
         cost_index: float = 60.0,
         met_spacing_m: float = 20_000.0,
         max_dist_m: float = 500_000.0,
-        **interp_kwargs: Any,
     ) -> Self:
         """Build a vertical-only optimizer from a ``pycontrails.Flight`` trajectory."""
         if not flight:
@@ -755,7 +749,6 @@ class Optimizer:
             dag=dag,
             cost_index=cost_index,
             met_spacing_m=met_spacing_m,
-            **interp_kwargs,
         )
 
     def __repr__(self) -> str:
