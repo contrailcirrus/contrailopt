@@ -314,57 +314,138 @@ def climb_to_target(
     return float(total_dist), float(total_fuel), float(total_time), float(mass)
 
 
-class DescentTable:
-    """Precomputed 3 degree descent lookup with speed schedule."""
+def final_descent(
+    src_alt_ft: npt.NDArray[np.floating],
+    ground_alt_ft: float,
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """Compute a 3 degree descent from cruise FL to the ground.
 
-    MAX_ALT_FT = 45_000.0
-    DESCENT_ANGLE_DEG = 3.0
+    https://en.wikipedia.org/wiki/Rule_of_three_(aeronautics)
 
-    def __init__(self, atyp: ps_aircraft_params.PSAircraftEngineParams):
-        band_edges = np.arange(0, self.MAX_ALT_FT + 1000.0, 1000.0, dtype=np.float32)
-        band_mids = band_edges[:-1] + 500.0
-        air_pressure = units.ft_to_pl(band_mids) * 100.0
-        T_isa = units.m_to_T_isa(units.ft_to_m(band_mids))
+    Fixes the descent angle and speed schedule, then solves for the required
+    thrust from the force balance at each 1000 ft altitude band. Fuel flow
+    is computed through the PS model chain, with idle fuel flow as a floor.
 
-        mach_lim = ps_operational_limits.max_mach_number_by_altitude(
-            band_mids,
-            air_pressure,
-            atyp.max_mach_num,
-            np.float32(atyp.p_i_max),  # avoid promotion
-            atyp.p_inf_co,
-            atm_speed_limit=True,
-            buffer=0.0,
-        )
-        mach = np.minimum(atyp.m_des, mach_lim)
-        tas = units.mach_number_to_tas(mach, T_isa)
+    Distance and time are mass-independent (fixed geometry and speed schedule).
+    Fuel has weak but nonzero sensitivity to mass: heavier aircraft need less
+    thrust (gravity does more work), so descent fuel *decreases* with mass.
+    But the sensitivity is small enough that we can just use the max landing weight for now.
 
-        self._band_dist = units.ft_to_m(1000.0) / np.tan(np.deg2rad(self.DESCENT_ANGLE_DEG)).item()
-        band_time = self._band_dist / tas
+    Parameters
+    ----------
+    src_alt_ft : npt.NDArray[np.floating]
+        Starting altitude(s) in feet, e.g. one per candidate flight level.
+    ground_alt_ft : float
+        Ground altitude at the destination in feet.
+    atyp : ps_aircraft_params.PSAircraftEngineParams
+        Aircraft/engine parameters.
 
-        self._cum_time = np.zeros_like(band_edges)
-        np.cumsum(band_time, out=self._cum_time[1:])
+    Returns
+    -------
+    descent_dist : npt.NDArray[np.floating]
+        Horizontal distance consumed by the descent, in meters. Same shape as ``src_alt_ft``.
+    descent_fuel : npt.NDArray[np.floating]
+        Fuel burned during the descent, in kg.
+    descent_time : npt.NDArray[np.floating]
+        Time for the descent, in seconds.
+    """
+    max_alt = 45_000.0
+    mass = atyp.amass_mlw
+    descent_angle = np.float32(-3.0)  # constant descent angle of 3 degrees
 
-    def __call__(
-        self,
-        src_alt_ft: npt.NDArray[np.floating],
-        dst_alt_ft: npt.NDArray[np.floating],
-    ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-        """Look up descent distance and time from ``src_alt_ft`` to ``dst_alt_ft``.
+    band_start = ground_alt_ft // 1000.0 * 1000.0
+    band_edges = np.arange(band_start, max_alt + 1000.0, 1000.0, dtype=src_alt_ft.dtype)
+    band_mids = band_edges[:-1] + 500.0
 
-        Return a tuple of float32 arrays:
-        - descent distance in m
-        - descent time in s
+    air_pressure = units.ft_to_pl(band_mids) * 100.0
+    T_isa = units.m_to_T_isa(units.ft_to_m(band_mids))
 
-        If ``src_alt_ft <= dst_alt_ft``, returns (0.0, 0.0) for that entry.
-        """
-        src_idx = np.round(src_alt_ft / 1000.0).astype(int)
-        dst_idx = np.round(dst_alt_ft / 1000.0).astype(int)
-        np.clip(src_idx, 0, len(self._cum_time) - 1, out=src_idx)
-        np.clip(dst_idx, 0, len(self._cum_time) - 1, out=dst_idx)
+    mach_lim = ps_operational_limits.max_mach_number_by_altitude(
+        band_mids,
+        air_pressure,
+        atyp.max_mach_num,
+        np.float32(atyp.p_i_max),
+        atyp.p_inf_co,
+        atm_speed_limit=True,
+        buffer=0.0,
+    )
+    mach = np.minimum(atyp.m_des, mach_lim)  # don't exceed design Mach
+    tas = units.mach_number_to_tas(mach, T_isa)
 
-        filt = src_idx > dst_idx
-        n_bands = (src_idx - dst_idx).astype(np.float32)  # avoid auto promotion to float64
-        descent_dist = np.where(filt, n_bands * self._band_dist, 0.0)
-        descent_time = np.where(filt, self._cum_time[src_idx] - self._cum_time[dst_idx], 0.0)
+    # Geometry of the bands
+    band_dist = units.ft_to_m(1000.0) / np.tan(np.deg2rad(-descent_angle))
+    band_time = band_dist / tas
 
-        return descent_dist, descent_time
+    # Aerodynamics and required thrust from force balance
+    rn = ps_model.reynolds_number(atyp.wing_surface_area, mach, T_isa, air_pressure)
+    c_f = ps_model.skin_friction_coefficient(rn)
+    c_lift = ps_model.lift_coefficient(
+        atyp.wing_surface_area,
+        mass,
+        air_pressure,
+        mach,
+        descent_angle,
+    )
+    c_drag_0 = ps_model.zero_lift_drag_coefficient(c_f, atyp.psi_0)
+    e_ls = ps_model.oswald_efficiency_factor(c_drag_0, atyp)
+    c_drag_w = ps_model.wave_drag_coefficient(mach, c_lift, atyp)
+    c_drag = ps_model.airframe_drag_coefficient(
+        c_drag_0,
+        c_drag_w,
+        c_lift,
+        e_ls,
+        atyp.wing_aspect_ratio,
+    )
+
+    # When the aircraft is heavy, f_thrust can be 0 at low altitudes
+    # This will cause c_t to be 0, which makes eta and ff nan
+    # Later we clip ff to the idle fuel flow so this isn't actually a problem
+    # But we just clip f_thrust to 1 to avoid numpy divide by zero warnings
+    f_thrust = ps_model.thrust_force(mass, c_lift, c_drag, 0.0, descent_angle)
+    f_thrust = np.maximum(f_thrust, 1.0)
+
+    # Fuel flow from PS model chain, clamped to idle floor
+    c_t = ps_model.engine_thrust_coefficient(f_thrust, mach, air_pressure, atyp.wing_surface_area)
+    c_t_eta_b = ps_model.thrust_coefficient_at_max_efficiency(mach, atyp.m_des, atyp.c_t_des)
+    eta = ps_model.overall_propulsion_efficiency(
+        mach,
+        c_t,
+        c_t_eta_b,
+        atyp,
+        engine_deterioration_factor=ENGINE_DETERIORATION_FACTOR,
+    )
+    ff = ps_model.fuel_mass_flow_rate(
+        air_pressure,
+        T_isa,
+        mach,
+        c_t,
+        eta,
+        atyp.wing_surface_area,
+        q_fuel=JetA.q_fuel,
+    )
+    ff_idle = ps_operational_limits.fuel_flow_idle(atyp.ff_idle_sls, band_mids)
+    ff = np.maximum(ff, ff_idle)  # could change to fmax if we expect nans in ff
+
+    band_fuel = ff * band_time
+
+    # Cumulative sums from ground up: band_edges[k] = k * 1000 ft
+    cum_dist = np.zeros_like(band_edges)
+    cum_time = np.zeros_like(band_edges)
+    cum_fuel = np.zeros_like(band_edges)
+    cum_dist[1:] = np.arange(1, len(band_edges), dtype=src_alt_ft.dtype) * band_dist
+    np.cumsum(band_time, out=cum_time[1:])
+    np.cumsum(band_fuel, out=cum_fuel[1:])
+
+    # Interpolate at source and ground altitudes, take the difference
+    descent_dist = np.interp(src_alt_ft, band_edges, cum_dist).astype(src_alt_ft.dtype) - np.interp(
+        ground_alt_ft, band_edges, cum_dist
+    ).astype(src_alt_ft.dtype)
+    descent_fuel = np.interp(src_alt_ft, band_edges, cum_fuel).astype(src_alt_ft.dtype) - np.interp(
+        ground_alt_ft, band_edges, cum_fuel
+    ).astype(src_alt_ft.dtype)
+    descent_time = np.interp(src_alt_ft, band_edges, cum_time).astype(src_alt_ft.dtype) - np.interp(
+        ground_alt_ft, band_edges, cum_time
+    ).astype(src_alt_ft.dtype)
+
+    return descent_dist, descent_fuel, descent_time

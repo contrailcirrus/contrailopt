@@ -230,7 +230,9 @@ class _SolverCtx:
     origin_elev_ft: float
     dest_elev_ft: float
     takeoff_time: pd.Timestamp
-    descent: ps.DescentTable
+    final_descent_dist: npt.NDArray[FLOAT_DTYPE]
+    final_descent_fuel: npt.NDArray[FLOAT_DTYPE]
+    final_descent_time: npt.NDArray[FLOAT_DTYPE]
     met_lookup: EdgeMetLookup | None
 
 
@@ -354,13 +356,13 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     flat_nbr, flat_dist, src_idx, flat_edge_idx = ctx.dag.expand_neighbors(h_idxs)
     flat_dist = flat_dist.astype(FLOAT_DTYPE, copy=False)  # custom dag may have different dtype
 
-    # Descent: step-down + ground descent if neighbor is destination
+    # Descent: ground descent if neighbor is destination.
+    # FL-to-FL step-downs are treated as part of cruise (mild thrust reduction at cruise Mach,
+    # negligible extra distance or time vs. level flight).
     is_dest = (flat_nbr == ctx.dag.h_dest)[:, np.newaxis]
-    dest_elev = np.array([ctx.dest_elev_ft], dtype=FLOAT_DTYPE)
-    final_descent_dist, final_descent_time = ctx.descent(fl_choices, dest_elev)
-    dd_step, dt_step = ctx.descent(src_fls[:, np.newaxis], fl_choices[np.newaxis, :])
-    descent_dd = dd_step[src_idx] + is_dest * final_descent_dist
-    descent_dt = dt_step[src_idx] + is_dest * final_descent_time
+    descent_dd = is_dest * ctx.final_descent_dist
+    descent_dt = is_dest * ctx.final_descent_time
+    descent_df = is_dest * ctx.final_descent_fuel
 
     # Cruise fuel/time: (n_edge, n_fl, n_mach)
     cruise_dist = flat_dist[:, np.newaxis] - climb_dist[src_idx] - descent_dd
@@ -393,7 +395,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
         feasible[src_idx, :, np.newaxis] & cruise_feasible & (cruise_dist[:, :, np.newaxis] > 0.0)
     )
     cruise_cost = ctx.cost_index / 60.0 * cruise_time + cruise_fuel
-    descent_cost = ctx.cost_index / 60.0 * descent_dt
+    descent_cost = ctx.cost_index / 60.0 * descent_dt + descent_df
     total_cost = (
         src_costs[src_idx, np.newaxis, np.newaxis]
         + climb_cost[src_idx, :, np.newaxis]
@@ -408,7 +410,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     best_mach = mach_choices[best_mach_idx.squeeze(2)]
     best_cruise_fuel = np.take_along_axis(cruise_fuel, best_mach_idx, axis=2).squeeze(2)
     best_cruise_time = np.take_along_axis(cruise_time, best_mach_idx, axis=2).squeeze(2)
-    arrival_mass = post_climb_mass[src_idx] - best_cruise_fuel
+    arrival_mass = post_climb_mass[src_idx] - best_cruise_fuel - descent_df
     arrival_time = src_elapsed[src_idx, None] + climb_time[src_idx] + best_cruise_time + descent_dt
 
     # Scatter-min into real FL slots only (not the ground slot)
@@ -448,16 +450,23 @@ def solve_dag(
     on_wavefront: Callable[[npt.NDArray[np.int64], DAGState], None] | None = None,
 ) -> DAGState:
     """Solve shortest-path DP on the topo-sorted DAG, tracking mass exactly."""
+    fl_choices = fl_choices.astype(FLOAT_DTYPE, copy=False)
+    mach_choices = mach_choices.astype(FLOAT_DTYPE, copy=False)
+
+    # Compute descent dist/fuel/time for each FL once up front.
+    fd_dist, fd_fuel, fd_time = ps.final_descent(fl_choices, dest_elev_ft, atyp)
     ctx = _SolverCtx(
         dag=dag,
-        fl_choices=fl_choices.astype(FLOAT_DTYPE, copy=False),
-        mach_choices=mach_choices.astype(FLOAT_DTYPE, copy=False),
+        fl_choices=fl_choices,
+        mach_choices=mach_choices,
         atyp=atyp,
         cost_index=cost_index,
         origin_elev_ft=origin_elev_ft,
         dest_elev_ft=dest_elev_ft,
         takeoff_time=takeoff_time,
-        descent=ps.DescentTable(atyp),
+        final_descent_dist=fd_dist,
+        final_descent_fuel=fd_fuel,
+        final_descent_time=fd_time,
         met_lookup=met_lookup,
     )
 
@@ -478,17 +487,14 @@ def solve_dag(
             on_wavefront(wave, state)
 
     # Populate destination ground slot from best FL
-    best_dest_fi = int(np.argmin(state.best_cost[dag.h_dest, :n_fl]))
+    best_dest_fi = np.argmin(state.best_cost[dag.h_dest, :n_fl]).item()
     if np.isfinite(state.best_cost[dag.h_dest, best_dest_fi]):
-        for arr in (
-            state.best_cost,
-            state.best_mass,
-            state.best_time,
-            state.best_mach,
-            state.best_prev_h,
-            state.best_prev_fi,
-        ):
-            arr[dag.h_dest, ground_fi] = arr[dag.h_dest, best_dest_fi]
+        state.best_cost[dag.h_dest, ground_fi] = state.best_cost[dag.h_dest, best_dest_fi]
+        state.best_mass[dag.h_dest, ground_fi] = state.best_mass[dag.h_dest, best_dest_fi]
+        state.best_time[dag.h_dest, ground_fi] = state.best_time[dag.h_dest, best_dest_fi]
+        state.best_mach[dag.h_dest, ground_fi] = state.best_mach[dag.h_dest, best_dest_fi]
+        state.best_prev_h[dag.h_dest, ground_fi] = state.best_prev_h[dag.h_dest, best_dest_fi]
+        state.best_prev_fi[dag.h_dest, ground_fi] = state.best_prev_fi[dag.h_dest, best_dest_fi]
 
     return state
 

@@ -7,11 +7,11 @@ from pycontrails.models.ps_model.ps_aircraft_params import PSAircraftEngineParam
 from pycontrails.physics import units
 
 from contrailopt.ps import (
-    DescentTable,
     climb_performance,
     climb_to_target,
     compute_climb_segment,
     cruise_performance,
+    final_descent,
 )
 
 
@@ -238,37 +238,33 @@ class TestClimbToTarget:
         assert fuel_heavy > fuel_light
 
 
-class TestDescentTable:
-    def test_distance_and_time_reasonable(self, atyp: PSParams) -> None:
-        table = DescentTable(atyp)
+class TestFinalDescent:
+    def test_distance_fuel_time_reasonable(self, atyp: PSParams) -> None:
         src_alt_ft = np.array([35000.0])
-        dst_alt_ft = np.array([0.0])
-
-        dist, time = table(src_alt_ft, dst_alt_ft)
+        dist, fuel, time = final_descent(src_alt_ft, 0.0, atyp)
         assert dist[0] == pytest.approx(203558, abs=100)
         assert time[0] == pytest.approx(1063.7, abs=1.0)
+        assert fuel[0] > 0.0
 
-    def test_no_descent(self, atyp: PSParams) -> None:
-        table = DescentTable(atyp)
-        dist, time = table(np.array([35000.0]), np.array([35000.0]))
-        assert dist[0] == 0.0
-        assert time[0] == 0.0
-
-        dist, time = table(np.array([30000.0]), np.array([35000.0]))
-        assert dist[0] == 0.0
-        assert time[0] == 0.0
+    def test_nonzero_ground_alt(self, atyp: PSParams) -> None:
+        src_alt_ft = np.array([35000.0])
+        dist_sea, fuel_sea, time_sea = final_descent(src_alt_ft, 0.0, atyp)
+        dist_high, fuel_high, time_high = final_descent(src_alt_ft, 5000.0, atyp)
+        assert dist_high[0] < dist_sea[0]
+        assert fuel_high[0] < fuel_sea[0]
+        assert time_high[0] < time_sea[0]
 
     def test_larger_descent_covers_more_distance(self, atyp: PSParams) -> None:
-        table = DescentTable(atyp)
         src_alt_ft = np.array([35000.0, 40000.0])
-        dst_alt_ft = np.array([0.0, 0.0])
-
-        dist, time = table(src_alt_ft, dst_alt_ft)
+        dist, fuel, time = final_descent(src_alt_ft, 0.0, atyp)
         assert dist[1] > dist[0]
+        assert fuel[1] > fuel[0]
         assert time[1] > time[0]
 
-    def test_out_of_bounds_clipped(self, atyp: PSParams) -> None:
-        table = DescentTable(atyp)
-        dist, time = table(np.array([60000.0]), np.array([0.0]))
-        assert dist[0] > 0.0
-        assert time[0] > 0.0
+    def test_fractional_ground_alt(self, atyp: PSParams) -> None:
+        src_alt_ft = np.array([35000.0])
+        dist_0, _, _ = final_descent(src_alt_ft, 0.0, atyp)
+        dist_500, _, _ = final_descent(src_alt_ft, 500.0, atyp)
+        dist_1000, _, _ = final_descent(src_alt_ft, 1000.0, atyp)
+        # 500 ft ground alt should interpolate between 0 and 1000
+        assert dist_1000[0] < dist_500[0] < dist_0[0]
