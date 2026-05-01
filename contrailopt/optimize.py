@@ -119,11 +119,36 @@ def _calculate_cruise_at_samples(
     climb_dist: npt.NDArray[FLOAT_DTYPE],
     descent_dd: npt.NDArray[FLOAT_DTYPE],
     flat_dist: npt.NDArray[FLOAT_DTYPE],
-) -> tuple[npt.NDArray[FLOAT_DTYPE], npt.NDArray[FLOAT_DTYPE], npt.NDArray[np.bool_]]:
-    """Compute per-edge cruise fuel, time, and feasibility from met samples.
+) -> tuple[
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[np.bool_],
+    npt.NDArray[FLOAT_DTYPE],
+]:
+    """Compute per-edge cruise fuel, time, feasibility, and EEF from met samples.
 
-    Returns three arrays of shape ``(n_edge, n_fl, n_mach)`` containing the cruise fuel,
-    time, and feasibility for each edge and FL/Mach choice.
+    Met data is interpolated at each sample point along the edge for every
+    candidate FL in ``fl_choices``. Cruise performance (fuel flow, TAS, wind)
+    is evaluated at each candidate FL (the destination node FL, not the source node FL)
+    For step-climbs, the cruise-zone weighting zeros out the climb portion so that only the
+    level-flight segment contributes to fuel and time. For step-descents, climb_dist is
+    zero, so the full edge is treated as cruise at the candidate FL.
+
+    The EEF term (``eef_per_m * delta_dist``) is accumulated over the full
+    edge without cruise-zone weighting because we want contrail forcing to apply
+    regardless of whether the aircraft is cruising or climbing/descending along the edge.
+
+    Returns
+    -------
+    cruise_fuel : npt.NDArray[FLOAT_DTYPE]
+        Shape ``(n_edge, n_fl, n_mach)``.
+    cruise_time : npt.NDArray[FLOAT_DTYPE]
+        Shape ``(n_edge, n_fl, n_mach)``.
+    cruise_feasible : npt.NDArray[np.bool_]
+        Shape ``(n_edge, n_fl, n_mach)``.
+    cruise_eef : npt.NDArray[FLOAT_DTYPE]
+        Shape ``(n_edge, n_fl)``. Integrated EEF in joules along the edge.
+        Zero if ``eef_per_m`` is not in the met data.
     """
     sample_idxs, sample_to_edge, edge_bounds = _expand_edge_samples(met_lookup, flat_edge_idx)
 
@@ -179,7 +204,15 @@ def _calculate_cruise_at_samples(
     cruise_time = np.add.reduceat(seg_time, edge_bounds, axis=0)
     cruise_fuel = np.add.reduceat(seg_fuel, edge_bounds, axis=0)
     cruise_feasible = np.add.reduceat(~feas, edge_bounds, axis=0) == 0
-    return cruise_fuel, cruise_time, cruise_feasible
+
+    # Accumulate eef_per_m over the full edge (no cruise zone weighting)
+    if sample_met.eef_per_m is not None:
+        seg_eef = sample_met.eef_per_m * seg_dist[:, np.newaxis]
+        cruise_eef = np.add.reduceat(seg_eef, edge_bounds, axis=0)
+    else:
+        cruise_eef = np.zeros_like(cruise_feasible, dtype=FLOAT_DTYPE)
+
+    return cruise_fuel, cruise_time, cruise_feasible, cruise_eef
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -365,7 +398,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     # Cruise fuel/time: (n_edge, n_fl, n_mach)
     cruise_dist = flat_dist[:, np.newaxis] - climb_dist[src_idx] - descent_dd
     if ctx.met_lookup is not None:
-        cruise_fuel, cruise_time, cruise_feasible = _calculate_cruise_at_samples(
+        cruise_fuel, cruise_time, cruise_feasible, cruise_eef = _calculate_cruise_at_samples(
             ctx.met_lookup,
             flat_edge_idx,
             src_idx,
@@ -380,6 +413,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             descent_dd,
             flat_dist,
         )
+        del cruise_eef  # FIXME
     else:
         cruise_fuel, cruise_time, cruise_feasible = _isa_cruise(
             fl_choices,
@@ -645,7 +679,7 @@ class Optimizer:
     dollar_tonne_co2e : float, default 0.0
         Carbon price in US dollars per tonne (1000kg) of CO2-equivalent. A value of
         0.0 disables the carbon cost term. If positive, the ``met`` parameter must be provided
-        with a ``eef_per_m`` variable giving the effective energy forcing in J per meter.
+        with a ``eef_per_m`` variable giving the expected effective energy forcing in J per meter.
     dollar_kg_fuel : float, default 1.0
         Fuel price in US dollars per kg. Only used to convert the carbon cost into the
         fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
