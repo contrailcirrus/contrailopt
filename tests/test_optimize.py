@@ -226,7 +226,7 @@ class TestComputeClimbs:
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
         ground_fi = len(fl_choices)
 
-        dist, fuel, time, mass, feasible, src_fls = _compute_climbs(
+        dist, fuel, time, mass, feasible = _compute_climbs(
             fl_idxs=np.array([ground_fi]),
             fl_choices=fl_choices,
             src_masses=np.array([70_000.0]),
@@ -242,14 +242,13 @@ class TestComputeClimbs:
         assert dist.dtype == FLOAT_DTYPE
         assert fuel.dtype == FLOAT_DTYPE
         assert mass.dtype == FLOAT_DTYPE
-        np.testing.assert_array_equal(src_fls, [1_000.0])
 
     def test_origin_branch_monotonic(self, atyp: PSParams) -> None:
         """Higher FL requires more distance, fuel, and time from ground."""
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0])
         ground_fi = len(fl_choices)
 
-        dist, fuel, time, _, _, _ = _compute_climbs(
+        dist, fuel, time, _, _ = _compute_climbs(
             fl_idxs=np.array([ground_fi]),
             fl_choices=fl_choices,
             src_masses=np.array([70_000.0]),
@@ -265,7 +264,7 @@ class TestComputeClimbs:
         """Same source and dest FL -> zero climb."""
         fl_choices = np.array([33_000.0])
 
-        dist, fuel, time, mass, feasible, _ = _compute_climbs(
+        dist, fuel, time, mass, feasible = _compute_climbs(
             fl_idxs=np.array([0]),
             fl_choices=fl_choices,
             src_masses=np.array([65_000.0]),
@@ -283,7 +282,7 @@ class TestComputeClimbs:
         """FL290 -> FL330 should have positive climb distance and fuel."""
         fl_choices = np.array([29_000.0, 33_000.0])
 
-        dist, fuel, _, _, feasible, _ = _compute_climbs(
+        dist, fuel, _, _, feasible = _compute_climbs(
             fl_idxs=np.array([0]),
             fl_choices=fl_choices,
             src_masses=np.array([65_000.0]),

@@ -248,13 +248,12 @@ def _compute_climbs(
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[np.bool_],
-    npt.NDArray[FLOAT_DTYPE],
 ]:
     """Compute climb dist/fuel/time from source FLs to each candidate FL.
 
     Handles two cases: origin-to-FL (ground source) and FL-to-FL (cruise source).
 
-    Returns six arrays of shape ``(n_src, n_fl)``.
+    Returns five arrays of shape ``(n_src, n_fl)``.
     """
     ground_fi = len(fl_choices)
 
@@ -263,7 +262,6 @@ def _compute_climbs(
         if len(fl_idxs) != 1:
             raise RuntimeError("Only one origin node should be active in the first wavefront")
 
-        src_fls = np.array([origin_elev_ft], dtype=FLOAT_DTYPE)
         base_alt = fl_choices[0]
         init_dist, init_fuel, init_time, base_mass = ps.climb_to_target(
             src_masses[0],
@@ -296,7 +294,7 @@ def _compute_climbs(
         )
         feasible = feasible | (fl_choices[np.newaxis, :] <= src_fls[:, np.newaxis])
 
-    return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible, src_fls
+    return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible
 
 
 def _isa_cruise(
@@ -343,7 +341,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     src_elapsed = state.best_time[h_idxs, fl_idxs]
 
     # Climb from src_fl to each dst_fl: (n_src, n_fl)
-    climb_dist, climb_fuel, climb_time, post_climb_mass, feasible, src_fls = _compute_climbs(
+    climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_climbs(
         fl_idxs,
         fl_choices,
         src_masses,
