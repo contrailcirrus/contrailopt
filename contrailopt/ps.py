@@ -144,6 +144,8 @@ def compute_climb_segment(
     dst_alt_ft: npt.NDArray[np.floating],
     src_mass: npt.NDArray[np.floating],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
+    delta_isa: npt.NDArray[np.floating] | float,
+    tailwind: npt.NDArray[np.floating] | float,
 ) -> tuple[
     npt.NDArray[np.floating],
     npt.NDArray[np.floating],
@@ -157,6 +159,8 @@ def compute_climb_segment(
     updating mass for fuel burn. Climb uses a fixed fraction of maximum continuous thrust
     at the design Mach number.
 
+    Set ``delta_isa`` and ``tailwind`` to zero for a weather-agnostic climb estimate.
+
     Return a tuple of:
     - climb distance in m
     - climb fuel in kg
@@ -166,7 +170,9 @@ def compute_climb_segment(
 
     Values for infeasible entries (where feasible is False) are corrupt and should not be used.
     """
-    src_alt_ft, dst_alt_ft, src_mass = np.broadcast_arrays(src_alt_ft, dst_alt_ft, src_mass)
+    src_alt_ft, dst_alt_ft, src_mass, delta_isa, tailwind = np.broadcast_arrays(
+        src_alt_ft, dst_alt_ft, src_mass, delta_isa, tailwind
+    )
 
     alt_ft = src_alt_ft.copy()
     mass = src_mass.copy()
@@ -184,7 +190,7 @@ def compute_climb_segment(
         step = np.minimum(1000.0, dst_alt_ft[active] - alt_ft[active])
         mid_alt_ft = alt_ft[active] + step / 2.0
 
-        air_temperature = units.m_to_T_isa(units.ft_to_m(mid_alt_ft))
+        air_temperature = units.m_to_T_isa(units.ft_to_m(mid_alt_ft)) + delta_isa[active]
 
         # Values where step_feasible is False do not make sense (negative ROCD, etc.)
         ff, rocd, tas, feas = climb_performance(mid_alt_ft, mass[active], air_temperature, atyp)
@@ -192,7 +198,7 @@ def compute_climb_segment(
         feasible[active] &= feas
 
         dt_s = step / rocd * 60.0
-        total_dist[active] += tas * dt_s
+        total_dist[active] += (tas + tailwind[active]) * dt_s
         total_fuel[active] += ff * dt_s
         total_time[active] += dt_s
         mass[active] -= ff * dt_s
@@ -209,7 +215,7 @@ def climb_to_target(
 ) -> tuple[float, float, float, float]:
     """Integrate climb from ground to target altitude in 1000 ft steps.
 
-    This function always uses the ISA temperature profile.
+    This function always uses the ISA temperature profile and no wind.
 
     Unlike climb_performance and compute_climb_segment, this function applies a realistic
     IAS/Mach speed schedule with ATM speed limits below 10,000 ft.

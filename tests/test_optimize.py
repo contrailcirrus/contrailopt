@@ -15,7 +15,8 @@ from contrailopt.optimize import (
     DAGState,
     Optimizer,
     _build_dag,
-    _compute_climbs,
+    _compute_edge_climbs,
+    _compute_ground_climbs,
     _cruise_zone_weights,
     _estimate_flight_hours,
     _estimate_mass,
@@ -220,56 +221,50 @@ class TestCruiseZoneWeights:
         np.testing.assert_allclose(weights, [[0.0], [0.0]])
 
 
-class TestComputeClimbs:
-    def test_origin_branch_shapes(self, atyp: PSParams) -> None:
+class TestComputeGroundClimbs:
+    def test_shapes(self, atyp: PSParams) -> None:
         """Origin wavefront returns correct shapes and dtypes."""
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
-        ground_fi = len(fl_choices)
 
-        dist, fuel, time, mass, feasible = _compute_climbs(
-            fl_idxs=np.array([ground_fi]),
-            fl_choices=fl_choices,
-            src_masses=np.array([70_000.0]),
-            atyp=atyp,
-            origin_elev_ft=1_000.0,
+        dist, fuel, time, mass, feasible = _compute_ground_climbs(
+            fl_choices, 70_000.0, atyp, 1_000.0
         )
 
-        assert dist.shape == (1, 3)
-        assert fuel.shape == (1, 3)
-        assert time.shape == (1, 3)
-        assert mass.shape == (1, 3)
-        assert feasible.shape == (1, 3)
+        assert dist.shape == (3,)
+        assert fuel.shape == (3,)
+        assert time.shape == (3,)
+        assert mass.shape == (3,)
+        assert feasible.shape == (3,)
         assert dist.dtype == FLOAT_DTYPE
         assert fuel.dtype == FLOAT_DTYPE
         assert mass.dtype == FLOAT_DTYPE
 
-    def test_origin_branch_monotonic(self, atyp: PSParams) -> None:
+    def test_monotonic(self, atyp: PSParams) -> None:
         """Higher FL requires more distance, fuel, and time from ground."""
-        fl_choices = np.array([29_000.0, 33_000.0, 37_000.0])
-        ground_fi = len(fl_choices)
+        fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
 
-        dist, fuel, time, _, _ = _compute_climbs(
-            fl_idxs=np.array([ground_fi]),
-            fl_choices=fl_choices,
-            src_masses=np.array([70_000.0]),
-            atyp=atyp,
-            origin_elev_ft=1_000.0,
-        )
+        dist, fuel, time, _, _ = _compute_ground_climbs(fl_choices, 70_000.0, atyp, 1_000.0)
 
-        assert np.all(np.diff(dist[0]) > 0)
-        assert np.all(np.diff(fuel[0]) > 0)
-        assert np.all(np.diff(time[0]) > 0)
+        assert np.all(np.diff(dist) > 0)
+        assert np.all(np.diff(fuel) > 0)
+        assert np.all(np.diff(time) > 0)
 
-    def test_cruise_branch_level_flight(self, atyp: PSParams) -> None:
+
+class TestComputeEdgeClimbs:
+    def test_level_flight(self, atyp: PSParams) -> None:
         """Same source and dest FL -> zero climb."""
-        fl_choices = np.array([33_000.0])
+        fl_choices = np.array([33_000.0], dtype=FLOAT_DTYPE)
 
-        dist, fuel, time, mass, feasible = _compute_climbs(
+        dist, fuel, time, mass, feasible = _compute_edge_climbs(
             fl_idxs=np.array([0]),
             fl_choices=fl_choices,
-            src_masses=np.array([65_000.0]),
+            src_idx=np.array([0]),
+            src_masses=np.array([65_000.0], dtype=FLOAT_DTYPE),
+            src_elapsed=np.array([0.0], dtype=FLOAT_DTYPE),
+            flat_edge_idx=np.array([0]),
             atyp=atyp,
-            origin_elev_ft=1_000.0,
+            takeoff_time=pd.Timestamp("2024-01-01"),
+            met_lookup=None,
         )
 
         assert dist[0, 0] == 0.0
@@ -278,16 +273,20 @@ class TestComputeClimbs:
         assert mass[0, 0] == 65_000.0
         assert feasible[0, 0]
 
-    def test_cruise_branch_step_climb(self, atyp: PSParams) -> None:
+    def test_step_climb(self, atyp: PSParams) -> None:
         """FL290 -> FL330 should have positive climb distance and fuel."""
-        fl_choices = np.array([29_000.0, 33_000.0])
+        fl_choices = np.array([29_000.0, 33_000.0], dtype=FLOAT_DTYPE)
 
-        dist, fuel, _, _, feasible = _compute_climbs(
+        dist, fuel, _, _, feasible = _compute_edge_climbs(
             fl_idxs=np.array([0]),
             fl_choices=fl_choices,
-            src_masses=np.array([65_000.0]),
+            src_idx=np.array([0]),
+            src_masses=np.array([65_000.0], dtype=FLOAT_DTYPE),
+            src_elapsed=np.array([0.0], dtype=FLOAT_DTYPE),
+            flat_edge_idx=np.array([0]),
             atyp=atyp,
-            origin_elev_ft=1_000.0,
+            takeoff_time=pd.Timestamp("2024-01-01"),
+            met_lookup=None,
         )
 
         assert dist.shape == (1, 2)
@@ -297,20 +296,6 @@ class TestComputeClimbs:
         assert dist[0, 1] > 0.0
         assert fuel[0, 1] > 0.0
         assert feasible[0, 1]
-
-    def test_origin_multiple_sources_raises(self, atyp: PSParams) -> None:
-        """Multiple ground sources in one wavefront raises RuntimeError."""
-        fl_choices = np.array([33_000.0])
-        ground_fi = len(fl_choices)
-
-        with pytest.raises(RuntimeError, match="Only one origin"):
-            _compute_climbs(
-                fl_idxs=np.array([ground_fi, ground_fi]),
-                fl_choices=fl_choices,
-                src_masses=np.array([70_000.0, 70_000.0]),
-                atyp=atyp,
-                origin_elev_ft=1_000.0,
-            )
 
 
 class TestIsaCruise:

@@ -60,8 +60,8 @@ def _estimate_sample_times(
 
     Returns shape ``(n_sample, n_fl)``.
     """
-    # Per-FL climb time for each sample's source: (n_sample, n_fl)
-    sample_climb_s = climb_time[src_idx[sample_to_edge]]
+    # Per-FL climb time for each sample's edge: (n_sample, n_fl)
+    sample_climb_s = climb_time[sample_to_edge]
     edge_start_s = src_elapsed[src_idx[sample_to_edge], np.newaxis] + sample_climb_s
 
     # Per-FL TAS estimate using mean Mach and ISA temperature at each FL
@@ -129,7 +129,7 @@ def _calculate_cruise_at_samples(
 
     Met data is interpolated at each sample point along the edge for every
     candidate FL in ``fl_choices``. Cruise performance (fuel flow, TAS, wind)
-    is evaluated at each candidate FL (the destination node FL, not the source node FL)
+    is evaluated at each candidate FL (the destination node FL, not the source node FL).
     For step-climbs, the cruise-zone weighting zeros out the climb portion so that only the
     level-flight segment contributes to fuel and time. For step-descents, climb_dist is
     zero, so the full edge is treated as cruise at the candidate FL.
@@ -137,6 +137,35 @@ def _calculate_cruise_at_samples(
     The EEF term (``eef_per_m * delta_dist``) is accumulated over the full
     edge without cruise-zone weighting because we want contrail forcing to apply
     regardless of whether the aircraft is cruising or climbing/descending along the edge.
+
+    Parameters
+    ----------
+    met_lookup : EdgeMetLookup
+        Pre-built met interpolator.
+    flat_edge_idx : npt.NDArray[np.int64]
+        Global edge index for each edge. Shape ``(n_edge,)``.
+    src_idx : npt.NDArray[np.int64]
+        Maps each edge to its source in the active-source arrays. Shape ``(n_edge,)``.
+    fl_choices : npt.NDArray[FLOAT_DTYPE]
+        Candidate FLs in feet. Shape ``(n_fl,)``.
+    mach_choices : npt.NDArray[FLOAT_DTYPE]
+        Candidate Mach numbers. Shape ``(n_mach,)``.
+    post_climb_mass : npt.NDArray[FLOAT_DTYPE]
+        Mass after climb for each edge and FL. Shape ``(n_edge, n_fl)``.
+    atyp : PSAircraftEngineParams
+        Aircraft/engine parameters.
+    takeoff_time : pd.Timestamp
+        Flight departure time.
+    src_elapsed : npt.NDArray[FLOAT_DTYPE]
+        Elapsed time at each active source. Shape ``(n_src,)``.
+    climb_time : npt.NDArray[FLOAT_DTYPE]
+        Time spent climbing for each edge and FL. Shape ``(n_edge, n_fl)``.
+    climb_dist : npt.NDArray[FLOAT_DTYPE]
+        Ground distance consumed by climb. Shape ``(n_edge, n_fl)``.
+    descent_dd : npt.NDArray[FLOAT_DTYPE]
+        Descent distance deducted from edge length. Shape ``(n_edge, n_fl)``.
+    flat_dist : npt.NDArray[FLOAT_DTYPE]
+        Total edge distance. Shape ``(n_edge,)``.
 
     Returns
     -------
@@ -168,7 +197,7 @@ def _calculate_cruise_at_samples(
 
     # Cruise performance at each (sample, FL, Mach)
     air_temp_3d = sample_met.air_temperature[:, :, np.newaxis]
-    mass_3d = post_climb_mass[src_idx[sample_to_edge]][:, :, np.newaxis]
+    mass_3d = post_climb_mass[sample_to_edge][:, :, np.newaxis]
     ff, feas = ps.cruise_performance(
         fl_choices[np.newaxis, :, np.newaxis],
         mach_choices[np.newaxis, np.newaxis, :],
@@ -269,10 +298,9 @@ class _SolverCtx:
     met_lookup: EdgeMetLookup | None
 
 
-def _compute_climbs(
-    fl_idxs: npt.NDArray[np.int64],
+def _compute_ground_climbs(
     fl_choices: npt.NDArray[FLOAT_DTYPE],
-    src_masses: npt.NDArray[FLOAT_DTYPE],
+    src_mass: float,
     atyp: ps_aircraft_params.PSAircraftEngineParams,
     origin_elev_ft: float,
 ) -> tuple[
@@ -282,51 +310,128 @@ def _compute_climbs(
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[np.bool_],
 ]:
-    """Compute climb dist/fuel/time from source FLs to each candidate FL.
+    """Compute windless ISA climb from the ground to each candidate FL.
 
-    Handles two cases: origin-to-FL (ground source) and FL-to-FL (cruise source).
-
-    Returns five arrays of shape ``(n_src, n_fl)``.
+    Only used for the origin wavefront. Returns five arrays of shape ``(n_fl,)``.
     """
-    ground_fi = len(fl_choices)
+    base_alt = fl_choices[0]
+    init_dist, init_fuel, init_time, base_mass = ps.climb_to_target(
+        src_mass,
+        origin_elev_ft,
+        base_alt,
+        atyp,
+    )
+    next_dist, next_fuel, next_time, post_climb_mass, feasible = ps.compute_climb_segment(
+        base_alt,
+        fl_choices,
+        FLOAT_DTYPE(base_mass),
+        atyp,
+        delta_isa=0.0,
+        tailwind=0.0,
+    )
 
-    if (fl_idxs == ground_fi).any():
-        # Origin wavefront: single ground source, needs full climb_to_target
-        if len(fl_idxs) != 1:
-            raise RuntimeError("Only one origin node should be active in the first wavefront")
+    climb_dist = init_dist + next_dist
+    climb_fuel = init_fuel + next_fuel
+    climb_time = init_time + next_time
 
-        base_alt = fl_choices[0]
-        init_dist, init_fuel, init_time, base_mass = ps.climb_to_target(
-            src_masses[0],
-            origin_elev_ft,
-            base_alt,
-            atyp,
-        )
-        next_dist, next_fuel, next_time, post_climb_mass, feasible = ps.compute_climb_segment(
-            base_alt,
-            fl_choices,
-            FLOAT_DTYPE(base_mass),
-            atyp,
-        )
+    return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible
 
-        climb_dist = (init_dist + next_dist)[np.newaxis, :]  # (1, n_fl)
-        climb_fuel = (init_fuel + next_fuel)[np.newaxis, :]  # (1, n_fl)
-        climb_time = (init_time + next_time)[np.newaxis, :]  # (1, n_fl)
-        post_climb_mass = post_climb_mass[np.newaxis, :]  # (1, n_fl)
-        feasible = feasible[np.newaxis, :]  # (1, n_fl)
+
+def _compute_edge_climbs(
+    fl_idxs: npt.NDArray[np.int64],
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    src_idx: npt.NDArray[np.int64],
+    src_masses: npt.NDArray[FLOAT_DTYPE],
+    src_elapsed: npt.NDArray[FLOAT_DTYPE],
+    flat_edge_idx: npt.NDArray[np.int64],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    takeoff_time: pd.Timestamp,
+    met_lookup: EdgeMetLookup | None,
+) -> tuple[
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[np.bool_],
+]:
+    """Compute start-of-edge FL-to-FL step climbs with met-based corrections.
+
+    The delta between met and ISA temperature at the source node is computed
+    once and added as a constant offset at every altitude step during the climb.
+    Tailwind is computed from wind at the source node in the direction of the edge
+    azimuth and converts true air distance to ground distance inside
+    ``compute_climb_segment``.
+
+    Parameters
+    ----------
+    fl_idxs : npt.NDArray[np.int64]
+        Source FL index for each active source. Shape ``(n_src,)``.
+    fl_choices : npt.NDArray[FLOAT_DTYPE]
+        Candidate destination FLs. Shape ``(n_fl,)``.
+    src_idx : npt.NDArray[np.int64]
+        Maps each edge to its source in the active-source arrays. Shape ``(n_edge,)``.
+    src_masses : npt.NDArray[FLOAT_DTYPE]
+        Mass at each active source. Shape ``(n_src,)``.
+    src_elapsed : npt.NDArray[FLOAT_DTYPE]
+        Elapsed time at each active source. Shape ``(n_src,)``.
+    flat_edge_idx : npt.NDArray[np.int64]
+        Global edge index for each edge. Shape ``(n_edge,)``.
+    atyp : PSAircraftEngineParams
+        Aircraft/engine parameters.
+    takeoff_time : pd.Timestamp
+        Flight departure time.
+    met_lookup : EdgeMetLookup or None
+        Met interpolator. If None, ISA + zero wind is used.
+
+    Returns
+    -------
+    climb_dist : npt.NDArray[FLOAT_DTYPE]
+        Ground distance consumed by climb. Shape ``(n_edge, n_fl)``.
+    climb_fuel : npt.NDArray[FLOAT_DTYPE]
+        Fuel burned during climb. Shape ``(n_edge, n_fl)``.
+    climb_time : npt.NDArray[FLOAT_DTYPE]
+        Time spent climbing. Shape ``(n_edge, n_fl)``.
+    post_climb_mass : npt.NDArray[FLOAT_DTYPE]
+        Aircraft mass after climb. Shape ``(n_edge, n_fl)``.
+    feasible : npt.NDArray[np.bool_]
+        True where the climb is feasible or dst <= src (step-down). Shape ``(n_edge, n_fl)``.
+    """
+    n_fl = len(fl_choices)
+    edge_src_fi = fl_idxs[src_idx]
+    edge_src_fl = fl_choices[edge_src_fi]
+    edge_src_mass = src_masses[src_idx]
+
+    if met_lookup is not None:
+        edge_start = met_lookup.edge_ptr[flat_edge_idx]
+        src_time_s = src_elapsed[src_idx]
+        src_dt = np.datetime64(takeoff_time) + (src_time_s * 1e9).astype("timedelta64[ns]")
+        climb_dt = np.broadcast_to(src_dt[:, np.newaxis], (len(src_idx), n_fl))
+        climb_met = met_lookup(edge_start, climb_dt)
+
+        edge_arange = np.arange(len(src_idx))
+        met_T = climb_met.air_temperature[edge_arange, edge_src_fi]
+        isa_T = units.m_to_T_isa(units.ft_to_m(edge_src_fl))
+        delta_isa = (met_T - isa_T)[:, np.newaxis]
+
+        az = met_lookup.sample_azimuth[edge_start]
+        u = climb_met.eastward_wind[edge_arange, edge_src_fi]
+        v = climb_met.northward_wind[edge_arange, edge_src_fi]
+        tailwind = (u * np.sin(az) + v * np.cos(az))[:, np.newaxis]
     else:
-        # All cruise sources: FL-to-FL climbs
-        src_fls = fl_choices[fl_idxs]
+        delta_isa = 0.0
+        tailwind = 0.0
 
-        # Each has shape (n_src, n_fl)
-        climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = ps.compute_climb_segment(
-            src_fls[:, np.newaxis],
-            fl_choices[np.newaxis, :],
-            src_masses[:, np.newaxis],
-            atyp,
-        )
-        feasible = feasible | (fl_choices[np.newaxis, :] <= src_fls[:, np.newaxis])
+    climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = ps.compute_climb_segment(
+        edge_src_fl[:, np.newaxis],
+        fl_choices[np.newaxis, :],
+        edge_src_mass[:, np.newaxis],
+        atyp,
+        delta_isa=delta_isa,
+        tailwind=tailwind,
+    )
 
+    # Step-downs (dst <= src) bypass the climb model and are always feasible
+    feasible = feasible | (fl_choices[np.newaxis, :] <= edge_src_fl[:, np.newaxis])
     return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible
 
 
@@ -373,19 +478,40 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     src_masses = state.best_mass[h_idxs, fl_idxs]
     src_elapsed = state.best_time[h_idxs, fl_idxs]
 
-    # Climb from src_fl to each dst_fl: (n_src, n_fl)
-    climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_climbs(
-        fl_idxs,
-        fl_choices,
-        src_masses,
-        ctx.atyp,
-        ctx.origin_elev_ft,
-    )
-    climb_cost = ctx.cost_index / 60.0 * climb_time + climb_fuel
-
     # Expand CSR adjacency for active sources into flat edge arrays
     flat_nbr, flat_dist, src_idx, flat_edge_idx = ctx.dag.expand_neighbors(h_idxs)
     flat_dist = flat_dist.astype(FLOAT_DTYPE, copy=False)  # custom dag may have different dtype
+
+    # Climb from src_fl to each dst_fl: (n_edge, n_fl)
+    ground_fi = len(fl_choices)
+    if (fl_idxs == ground_fi).any():
+        # Origin wavefront: ISA climb from ground, broadcast to (n_edge, n_fl)
+        climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_ground_climbs(
+            fl_choices,
+            src_masses[0],
+            ctx.atyp,
+            ctx.origin_elev_ft,
+        )
+        n_edge = len(src_idx)
+        climb_dist = np.broadcast_to(climb_dist, (n_edge, n_fl))
+        climb_fuel = np.broadcast_to(climb_fuel, (n_edge, n_fl))
+        climb_time = np.broadcast_to(climb_time, (n_edge, n_fl))
+        post_climb_mass = np.broadcast_to(post_climb_mass, (n_edge, n_fl))
+        feasible = np.broadcast_to(feasible, (n_edge, n_fl))
+    else:
+        climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_edge_climbs(
+            fl_idxs,
+            fl_choices,
+            src_idx,
+            src_masses,
+            src_elapsed,
+            flat_edge_idx,
+            ctx.atyp,
+            ctx.takeoff_time,
+            ctx.met_lookup,
+        )
+
+    climb_cost = ctx.cost_index / 60.0 * climb_time + climb_fuel
 
     # Descent: ground descent if neighbor is destination.
     # FL-to-FL step-downs are treated as part of cruise (mild thrust reduction at cruise Mach,
@@ -396,7 +522,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     descent_df = is_dest * ctx.final_descent_fuel
 
     # Cruise fuel/time: (n_edge, n_fl, n_mach)
-    cruise_dist = flat_dist[:, np.newaxis] - climb_dist[src_idx] - descent_dd
+    cruise_dist = flat_dist[:, np.newaxis] - climb_dist - descent_dd
     if ctx.met_lookup is not None:
         cruise_fuel, cruise_time, cruise_feasible, cruise_eef = _calculate_cruise_at_samples(
             ctx.met_lookup,
@@ -409,7 +535,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             ctx.takeoff_time,
             src_elapsed,
             climb_time,
-            climb_dist[src_idx],
+            climb_dist,
             descent_dd,
             flat_dist,
         )
@@ -418,19 +544,17 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
         cruise_fuel, cruise_time, cruise_feasible = _isa_cruise(
             fl_choices,
             mach_choices,
-            post_climb_mass[src_idx],
+            post_climb_mass,
             ctx.atyp,
             cruise_dist,
         )
 
-    valid = (
-        feasible[src_idx, :, np.newaxis] & cruise_feasible & (cruise_dist[:, :, np.newaxis] > 0.0)
-    )
+    valid = feasible[:, :, np.newaxis] & cruise_feasible & (cruise_dist[:, :, np.newaxis] > 0.0)
     cruise_cost = ctx.cost_index / 60.0 * cruise_time + cruise_fuel
     descent_cost = ctx.cost_index / 60.0 * descent_dt + descent_df
     total_cost = (
         src_costs[src_idx, np.newaxis, np.newaxis]
-        + climb_cost[src_idx, :, np.newaxis]
+        + climb_cost[:, :, np.newaxis]
         + descent_cost[:, :, np.newaxis]
         + cruise_cost
     )
@@ -442,8 +566,8 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     best_mach = mach_choices[best_mach_idx.squeeze(2)]
     best_cruise_fuel = np.take_along_axis(cruise_fuel, best_mach_idx, axis=2).squeeze(2)
     best_cruise_time = np.take_along_axis(cruise_time, best_mach_idx, axis=2).squeeze(2)
-    arrival_mass = post_climb_mass[src_idx] - best_cruise_fuel - descent_df
-    arrival_time = src_elapsed[src_idx, None] + climb_time[src_idx] + best_cruise_time + descent_dt
+    arrival_mass = post_climb_mass - best_cruise_fuel - descent_df
+    arrival_time = src_elapsed[src_idx, None] + climb_time + best_cruise_time + descent_dt
 
     # Scatter-min into real FL slots only (not the ground slot)
     # We'd really want to call something like np.argminimum.at to get the winners first,

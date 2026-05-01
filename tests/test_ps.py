@@ -127,7 +127,7 @@ class TestComputeClimbSegment:
         src_mass = np.array([70000.0])
 
         dist, fuel, time, mass, feasible = compute_climb_segment(
-            src_alt_ft, dst_alt_ft, src_mass, atyp
+            src_alt_ft, dst_alt_ft, src_mass, atyp, delta_isa=0.0, tailwind=0.0
         )
         assert feasible[0]
         assert dist[0] == 0.0
@@ -141,7 +141,7 @@ class TestComputeClimbSegment:
         src_mass = np.array([65000.0])
 
         dist, fuel, time, mass, feasible = compute_climb_segment(
-            src_alt_ft, dst_alt_ft, src_mass, atyp
+            src_alt_ft, dst_alt_ft, src_mass, atyp, delta_isa=0.0, tailwind=0.0
         )
         assert feasible[0]
         assert dist[0] == pytest.approx(75916, abs=100)
@@ -155,7 +155,7 @@ class TestComputeClimbSegment:
         src_mass = np.array([65000.0, 65000.0])
 
         dist, fuel, time, mass, feasible = compute_climb_segment(
-            src_alt_ft, dst_alt_ft, src_mass, atyp
+            src_alt_ft, dst_alt_ft, src_mass, atyp, delta_isa=0.0, tailwind=0.0
         )
         assert np.all(feasible)
         assert fuel[1] > fuel[0]
@@ -169,7 +169,7 @@ class TestComputeClimbSegment:
         src_mass = np.array([65000.0, 75000.0])
 
         dist, fuel, time, _, feasible = compute_climb_segment(
-            src_alt_ft, dst_alt_ft, src_mass, atyp
+            src_alt_ft, dst_alt_ft, src_mass, atyp, delta_isa=0.0, tailwind=0.0
         )
         assert np.all(feasible)
         # Heavier aircraft has lower ROCD, spending more time climbing,
@@ -183,7 +183,9 @@ class TestComputeClimbSegment:
         dst_alt_ft = np.array([37000.0])
         src_mass = np.array([atyp.amass_mtow])
 
-        _, _, _, _, feasible = compute_climb_segment(src_alt_ft, dst_alt_ft, src_mass, atyp)
+        _, _, _, _, feasible = compute_climb_segment(
+            src_alt_ft, dst_alt_ft, src_mass, atyp, delta_isa=0.0, tailwind=0.0
+        )
         assert not feasible[0]
 
 
