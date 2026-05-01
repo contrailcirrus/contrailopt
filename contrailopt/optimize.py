@@ -642,6 +642,13 @@ class Optimizer:
     cost_index : float, default 60.0
         Fuel-vs-time tradeoff in kg per minute. Higher values penalize time more,
         favoring faster (and more fuel-intensive) routes.
+    dollar_tonne_co2e : float, default 0.0
+        Carbon price in US dollars per tonne (1000kg) of CO2-equivalent. A value of
+        0.0 disables the carbon cost term. If positive, the ``met`` parameter must be provided
+        with a ``eef_per_m`` variable giving the effective energy forcing in J per meter.
+    dollar_kg_fuel : float, default 1.0
+        Fuel price in US dollars per kg. Only used to convert the carbon cost into the
+        fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
     met_spacing_m : float, default 20_000.0
         Spacing in meters between met sample points along each edge.
     avoidance_regions : list of polygon coordinate lists, or None
@@ -659,6 +666,8 @@ class Optimizer:
         met: MetDataset | None = None,
         dag: HorizontalDAG | None = None,
         cost_index: float = 60.0,
+        dollar_tonne_co2e: float = 0.0,
+        dollar_kg_fuel: float = 1.0,
         met_spacing_m: float = 20_000.0,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
     ) -> None:
@@ -671,8 +680,16 @@ class Optimizer:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         self.takeoff_time = takeoff_time
         self.cost_index = cost_index
+        self.dollar_tonne_co2e = dollar_tonne_co2e
+        self.dollar_kg_fuel = dollar_kg_fuel
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
+
+        if dollar_tonne_co2e > 0.0:
+            if met is None:
+                raise ValueError("met must be provided when dollar_tonne_co2e is set")
+            if "eef_per_m" not in met:
+                raise ValueError("met must contain 'eef_per_m' when dollar_tonne_co2e is set")
 
         self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions)
         self.avoidance_regions = avoidance_regions
@@ -710,6 +727,8 @@ class Optimizer:
         *,
         met: MetDataset | None = None,
         cost_index: float = 60.0,
+        dollar_tonne_co2e: float = 0.0,
+        dollar_kg_fuel: float = 1.0,
         met_spacing_m: float = 20_000.0,
         max_dist_m: float = 500_000.0,
     ) -> Self:
@@ -754,6 +773,8 @@ class Optimizer:
             met=met,
             dag=dag,
             cost_index=cost_index,
+            dollar_tonne_co2e=dollar_tonne_co2e,
+            dollar_kg_fuel=dollar_kg_fuel,
             met_spacing_m=met_spacing_m,
         )
 

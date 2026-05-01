@@ -615,6 +615,7 @@ class EdgeInterpolation:
     air_temperature: npt.NDArray[np.floating]
     eastward_wind: npt.NDArray[np.floating]
     northward_wind: npt.NDArray[np.floating]
+    eeef_per_m: npt.NDArray[np.floating] | None
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -711,6 +712,7 @@ class EdgeMetLookup:
             air_temperature=_lerp("air_temperature"),
             eastward_wind=_lerp("eastward_wind"),
             northward_wind=_lerp("northward_wind"),
+            eeef_per_m=_lerp("eeef_per_m") if "eeef_per_m" in self.ds else None,
         )
 
     @classmethod
@@ -767,7 +769,10 @@ class EdgeMetLookup:
         sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
 
         # Ensure variables
-        ds = met.data[["air_temperature", "eastward_wind", "northward_wind"]]
+        variables = ["air_temperature", "eastward_wind", "northward_wind"]
+        if "eeef_per_m" in met:
+            variables.append("eeef_per_m")
+        ds = met.data[variables]
 
         # Downselect met in time
         if takeoff_time.tzinfo:
