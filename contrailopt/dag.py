@@ -1,5 +1,6 @@
 """Utilities for horizontal DAG construction."""
 
+import warnings
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
@@ -772,15 +773,25 @@ class EdgeMetLookup:
         if takeoff_time.tzinfo:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
-        try:
-            ds = ds.sel(time=times)
-        except KeyError as exc:
-            available = pd.DatetimeIndex(ds["time"].values)  # pd.DatetimeIndex gives nicer message
+        available = pd.DatetimeIndex(ds["time"])
+        usable = times[times.isin(available)]
+
+        if len(usable) == 0:
             raise ValueError(
-                f"Estimated {flight_hours}h of met data needed to cover takeoff to landing.\n"
+                f"No met data available in the estimated flight window.\n"
                 f"Required: {times[0]} ... {times[-1]}.\n"
                 f"Available: {available[0]} ... {available[-1]}"
-            ) from exc
+            )
+
+        if len(usable) < len(times):
+            warnings.warn(
+                f"The met data covers {len(usable)} / {len(times)} estimated flight hours. "
+                f"The met time extends to {usable[-1]}, but candidate flights may reach "
+                f"{times[-1]}. If needed, met will be extrapolated outside its domain.",
+                stacklevel=2,
+            )
+
+        ds = ds.sel(time=usable)
 
         # Convert to altitude_ft coordinates
         ds_altitude_ft = units.pl_to_ft(ds["level"])
