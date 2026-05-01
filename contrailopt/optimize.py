@@ -18,6 +18,7 @@ from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
 
 if TYPE_CHECKING:
     from matplotlib.animation import FuncAnimation
+    from matplotlib.axes import Axes
 
 FLOAT_DTYPE = np.float32
 
@@ -936,6 +937,75 @@ class Optimizer:
             data={"mach_number": mach_number},
             aircraft_type=self.aircraft_type,
         )
+
+    def plot_wind(
+        self,
+        altitude_ft: float | None = None,
+        time: pd.Timestamp | None = None,
+        ax: "Axes | None" = None,
+        **kwargs,
+    ) -> "Axes":
+        """Plot wind quiver on DAG nodes for a given flight level and time.
+
+        Parameters
+        ----------
+        altitude_ft : float or None
+            Flight level in feet (e.g. ``37000``). Snaps to the nearest available
+            level. If *None*, uses the first available level.
+        time : pd.Timestamp or None
+            Time to select. Snaps to the nearest available time step. If *None*,
+            uses the first available time step.
+        ax : Axes or None
+            Cartopy axes to plot on. If None, calls ``self.dag.plot()`` to create one.
+        **kwargs
+            Passed to ``ax.quiver``.
+
+        Returns
+        -------
+        Axes
+            The axes with the quiver overlay.
+        """
+        if self.met_lookup is None:
+            raise ValueError("No met data available; pass met to Optimizer to use plot_wind")
+
+        if ax is None:
+            ax = self.dag.plot()
+
+        ds = self.met_lookup.ds
+
+        if altitude_ft is None:
+            altitude_ft = ds["altitude_ft"][0]
+        if time is None:
+            time = ds["time"][0]
+
+        wind = ds.sel(altitude_ft=altitude_ft, time=time, method="nearest")
+
+        # Get one sample index per node (first sample of each node's first outgoing edge)
+        has_edges = self.dag.out_degree > 0
+        node_sample_idx = self.met_lookup.edge_ptr[self.dag.adj_ptr[:-1][has_edges]]
+        node_lon = self.dag.lon[has_edges]
+        node_lat = self.dag.lat[has_edges]
+
+        u = wind.eastward_wind.values[node_sample_idx]
+        v = wind.northward_wind.values[node_sample_idx]
+
+        kwargs.setdefault("alpha", 0.6)
+        kwargs.setdefault("headwidth", 2)
+        kwargs.setdefault("headlength", 2)
+        kwargs.setdefault("headaxislength", 1.5)
+        ax.quiver(
+            node_lon,
+            node_lat,
+            u,
+            v,
+            transform=ax.projection,
+            **kwargs,
+        )
+
+        fl = int(wind["altitude_ft"].item())
+        t = pd.Timestamp(wind["time"].item())
+        ax.set_title(f"FL{fl // 100} — {t:%Y-%m-%d %H:%M UTC}")
+        return ax
 
     def animate_solve(self, display_fl_idx: int | None = None) -> "FuncAnimation":
         """Re-run the DP with converged mass and return a wavefront animation.
