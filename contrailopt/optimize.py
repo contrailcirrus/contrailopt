@@ -480,7 +480,6 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
 
     # Expand CSR adjacency for active sources into flat edge arrays
     flat_nbr, flat_dist, src_idx, flat_edge_idx = ctx.dag.expand_neighbors(h_idxs)
-    flat_dist = flat_dist.astype(FLOAT_DTYPE, copy=False)  # custom dag may have different dtype
 
     # Climb from src_fl to each dst_fl: (n_edge, n_fl)
     ground_fi = len(fl_choices)
@@ -750,6 +749,17 @@ def _build_dag(
 ) -> HorizontalDAG:
     """Validate or build a DAG, then apply avoidance regions."""
     if dag is not None:
+        # A custom DAG can have different dtypes; adjust here
+        dag = HorizontalDAG(
+            lon=dag.lon.astype(FLOAT_DTYPE, copy=False),
+            lat=dag.lat.astype(FLOAT_DTYPE, copy=False),
+            edge_dist=dag.edge_dist.astype(FLOAT_DTYPE, copy=False),
+            h_origin=dag.h_origin,
+            h_dest=dag.h_dest,
+            adj_ptr=dag.adj_ptr,
+            adj=dag.adj,
+        )
+
         lon0 = dag.lon[dag.h_origin]
         lat0 = dag.lat[dag.h_origin]
         if geo.haversine(lon0, lat0, origin.longitude, origin.latitude) > 10_000.0:  # 10 km

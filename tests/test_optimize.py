@@ -369,8 +369,8 @@ class TestSolveDag:
     @pytest.fixture
     def line3(self) -> HorizontalDAG:
         """3-node line DAG: 0 -> 1 -> 2, each edge ~530 km."""
-        lon = np.array([-80.0, -73.0, -66.0])
-        lat = np.array([40.0, 40.0, 40.0])
+        lon = np.array([-80.0, -73.0, -66.0], dtype=FLOAT_DTYPE)
+        lat = np.array([40.0, 40.0, 40.0], dtype=FLOAT_DTYPE)
         dag = HorizontalDAG.from_points(lon, lat, max_angle_deg=60.0, max_dist_m=600_000.0)
         assert dag.n_nodes == 3
         assert dag.n_edges == 2
@@ -566,9 +566,9 @@ class TestBuildDag:
             icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
         )
         dest = AirportCoords(icao_code="KBOS", longitude=-71.01, latitude=42.36, elevation_ft=20.0)
-        existing = HorizontalDAG.from_poisson(*origin.coords, *dest.coords).prune()
-        dag = _build_dag(origin, dest, dag=existing, avoidance_regions=None)
-        assert dag is existing
+        exist = HorizontalDAG.from_poisson(*origin.coords, *dest.coords, dtype=FLOAT_DTYPE).prune()
+        dag = _build_dag(origin, dest, dag=exist, avoidance_regions=None)
+        assert dag == exist
 
     def test_rejects_mismatched_dag(self) -> None:
         """DAG with wrong endpoints raises ValueError."""

@@ -145,6 +145,20 @@ class HorizontalDAG:
         name = type(self).__name__
         return f"{name}({self.n_nodes} nodes, {self.n_edges} edges)"
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, HorizontalDAG):
+            # https://docs.python.org/3/reference/datamodel.html#object.__eq__
+            return NotImplemented
+        return (
+            self.h_origin == other.h_origin
+            and self.h_dest == other.h_dest
+            and np.array_equal(self.lon, other.lon)
+            and np.array_equal(self.lat, other.lat)
+            and np.array_equal(self.adj_ptr, other.adj_ptr)
+            and np.array_equal(self.adj, other.adj)
+            and np.array_equal(self.edge_dist, other.edge_dist)
+        )
+
     @property
     def n_nodes(self) -> int:
         """The number of nodes in the graph."""
