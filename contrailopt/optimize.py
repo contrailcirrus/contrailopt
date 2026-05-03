@@ -1014,7 +1014,15 @@ class Optimizer:
                 self.met_lookup,
             )
             ground_fi = len(self.fl_choices)
-            trip_fuel = amass_init - state.best_mass[self.dag.h_dest, ground_fi].item()
+            amass_final = state.best_mass[self.dag.h_dest, ground_fi].item()
+            if not np.isfinite(amass_final):
+                raise ValueError(
+                    "No feasible path found. DAG edges may be too short for the "
+                    "initial climb or final descent. Try adjusting the max_dist_m "
+                    "if providing a custom DAG."
+                )
+
+            trip_fuel = amass_init - amass_final
             new_amass_init = min(landing_mass + trip_fuel, self.atyp.amass_mtow)
             if abs(new_amass_init - amass_init) < 100.0:  # 100 kg convergence threshold
                 break
