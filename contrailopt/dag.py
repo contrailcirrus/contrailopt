@@ -826,10 +826,11 @@ class EdgeMetLookup:
         # Load the data into memory here (we freely access ds.values in __call__)
         ds.load()
 
-        # Keep the original dtype (interp promotes to float64)
+        # Keep the original dtype (interp promotes to float64), which we assume is float32
+        # If we're given float64 met, we can run into issues if optimize.py assumes float32
         # This needs to happen after load because dask doesn't understand interp promotes
         for var in ds:
-            ds[var] = ds[var].astype(met.data[var].dtype)
+            ds[var] = ds[var].astype(np.float32)
 
         return cls(
             ds=ds,
