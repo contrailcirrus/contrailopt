@@ -16,7 +16,7 @@ from pycontrails.physics import geo, units
 from contrailopt.slerp import gc_interp, gc_npts, spherical_fwd
 
 if TYPE_CHECKING:
-    from matplotlib.axes import Axes
+    from cartopy.mpl.geoaxes import GeoAxes
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -393,7 +393,7 @@ class HorizontalDAG:
         edge_idx = np.repeat(np.arange(self.n_edges), n_samples)
         return sample_lon, sample_lat, edge_idx, edge_ptr
 
-    def plot(self, ax: "Axes | None" = None) -> "Axes":
+    def plot(self, ax: "GeoAxes | None" = None) -> "GeoAxes":
         """Plot the DAG on a cartopy map."""
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature

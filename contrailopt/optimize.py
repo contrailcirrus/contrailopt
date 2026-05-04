@@ -17,8 +17,8 @@ from contrailopt import ps
 from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
 
 if TYPE_CHECKING:
+    from cartopy.mpl.geoaxes import GeoAxes
     from matplotlib.animation import FuncAnimation
-    from matplotlib.axes import Axes
 
 FLOAT_DTYPE = np.float32
 
@@ -1156,14 +1156,17 @@ class Optimizer:
             aircraft_type=self.aircraft_type,
         )
 
-    def plot_wind(
+    def plot_met(
         self,
         altitude_ft: float | None = None,
         time: pd.Timestamp | None = None,
-        ax: "Axes | None" = None,
+        ax: "GeoAxes | None" = None,
         **kwargs,
-    ) -> "Axes":
-        """Plot wind quiver on DAG nodes for a given flight level and time.
+    ) -> "GeoAxes":
+        """Plot met data on DAG nodes for a given flight level and time.
+
+        Draws a wind quiver overlay. When ``eef_per_m`` is available in the
+        met lookup, also draws a scatter plot colored by EEF.
 
         Parameters
         ----------
@@ -1181,10 +1184,10 @@ class Optimizer:
         Returns
         -------
         Axes
-            The axes with the quiver overlay.
+            The axes with the met overlay.
         """
         if self.met_lookup is None:
-            raise ValueError("No met data available; pass met to Optimizer to use plot_wind")
+            raise ValueError("No met data available; pass met to Optimizer to use plot_met")
 
         if ax is None:
             ax = self.dag.plot()
@@ -1196,7 +1199,7 @@ class Optimizer:
         if time is None:
             time = ds["time"][0]
 
-        wind = ds.sel(altitude_ft=altitude_ft, time=time, method="nearest")
+        sel = ds.sel(altitude_ft=altitude_ft, time=time, method="nearest")
 
         # Get one sample index per node (first sample of each node's first outgoing edge)
         has_edges = self.dag.out_degree > 0
@@ -1204,8 +1207,8 @@ class Optimizer:
         node_lon = self.dag.lon[has_edges]
         node_lat = self.dag.lat[has_edges]
 
-        u = wind.eastward_wind.values[node_sample_idx]
-        v = wind.northward_wind.values[node_sample_idx]
+        u = sel.eastward_wind.values[node_sample_idx]
+        v = sel.northward_wind.values[node_sample_idx]
 
         kwargs.setdefault("alpha", 0.6)
         kwargs.setdefault("headwidth", 2)
@@ -1220,8 +1223,28 @@ class Optimizer:
             **kwargs,
         )
 
-        fl = int(wind["altitude_ft"].item())
-        t = pd.Timestamp(wind["time"].item())
+        if "eef_per_m" in ds:
+            eef = sel.eef_per_m.values[node_sample_idx]
+            finite = np.isfinite(eef)
+            vmax = np.abs(eef[finite]).max()
+            tcf = ax.tricontourf(
+                node_lon[finite],
+                node_lat[finite],
+                eef[finite],
+                levels=20,
+                cmap="RdBu_r",
+                vmin=-vmax,
+                vmax=vmax,
+                transform=ax.projection,
+                zorder=0,
+            )
+            fig = ax.get_figure()
+            pos = ax.get_position()
+            cax = fig.add_axes([pos.x0 + 0.02, pos.y0 + 0.04, pos.width * 0.3, 0.015])
+            fig.colorbar(tcf, cax=cax, orientation="horizontal", label="EEF (J/m)")
+
+        fl = int(sel["altitude_ft"].item())
+        t = pd.Timestamp(sel["time"].item())
         ax.set_title(f"FL{fl // 100} — {t:%Y-%m-%d %H:%M UTC}")
         return ax
 
