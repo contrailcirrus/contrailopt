@@ -22,6 +22,13 @@ if TYPE_CHECKING:
 
 FLOAT_DTYPE = np.float32
 
+# IPCC AR5 reference AGWP100: https://www.ipcc.ch/site/assets/uploads/2018/07/WGI_AR5.Chap_.8_SM.pdf
+_AGWP_CO2 = 91.7e-15  # W m-2 yr kg-1
+_SECONDS_PER_YEAR = 60 * 60 * 24 * 365  # s yr-1
+_SURFACE_AREA_EARTH = 5.101e14  # m2
+_J_PER_KG_CO2 = _AGWP_CO2 * _SURFACE_AREA_EARTH * _SECONDS_PER_YEAR  # J kg-1
+J_PER_TONNE_CO2 = _J_PER_KG_CO2 * 1000.0  # J tonne-1
+
 
 def _expand_edge_samples(
     met_lookup: EdgeMetLookup,
@@ -239,7 +246,7 @@ def _calculate_cruise_at_samples(
         seg_eef = sample_met.eef_per_m * seg_dist[:, np.newaxis]
         cruise_eef = np.add.reduceat(seg_eef, edge_bounds, axis=0)
     else:
-        cruise_eef = np.zeros_like(cruise_feasible, dtype=FLOAT_DTYPE)
+        cruise_eef = np.zeros((1, 1), dtype=FLOAT_DTYPE)
 
     return cruise_fuel, cruise_time, cruise_feasible, cruise_eef
 
@@ -282,13 +289,14 @@ class DAGResult:
 
 @dataclass(kw_only=True, slots=True, frozen=True)
 class _SolverCtx:
-    """Shared state passed to bootstrap and wavefront relaxation."""
+    """Shared state passed to wavefront relaxation."""
 
     dag: HorizontalDAG
     fl_choices: npt.NDArray[FLOAT_DTYPE]
     mach_choices: npt.NDArray[FLOAT_DTYPE]
     atyp: ps_aircraft_params.PSAircraftEngineParams
-    cost_index: float
+    cost_index: float  # kg fuel / minute of flight time
+    eef_cost_factor: float  # kg fuel / EEF Joule
     origin_elev_ft: float
     dest_elev_ft: float
     takeoff_time: pd.Timestamp
@@ -538,7 +546,6 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             descent_dd,
             flat_dist,
         )
-        del cruise_eef  # FIXME
     else:
         cruise_fuel, cruise_time, cruise_feasible = _isa_cruise(
             fl_choices,
@@ -547,6 +554,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             ctx.atyp,
             cruise_dist,
         )
+        cruise_eef = np.zeros((1, 1), dtype=FLOAT_DTYPE)
 
     valid = feasible[:, :, np.newaxis] & cruise_feasible & (cruise_dist[:, :, np.newaxis] > 0.0)
     cruise_cost = ctx.cost_index / 60.0 * cruise_time + cruise_fuel
@@ -556,6 +564,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
         + climb_cost[:, :, np.newaxis]
         + descent_cost[:, :, np.newaxis]
         + cruise_cost
+        + (ctx.eef_cost_factor * cruise_eef)[:, :, np.newaxis]
     )
     total_cost = np.where(valid, total_cost, np.inf)
 
@@ -598,6 +607,7 @@ def solve_dag(
     mach_choices: npt.NDArray[FLOAT_DTYPE],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
     cost_index: float,
+    eef_cost_factor: float,
     origin_elev_ft: float,
     dest_elev_ft: float,
     takeoff_time: pd.Timestamp,
@@ -616,6 +626,7 @@ def solve_dag(
         mach_choices=mach_choices,
         atyp=atyp,
         cost_index=cost_index,
+        eef_cost_factor=eef_cost_factor,
         origin_elev_ft=origin_elev_ft,
         dest_elev_ft=dest_elev_ft,
         takeoff_time=takeoff_time,
@@ -946,6 +957,11 @@ class Optimizer:
             met_spacing_m=met_spacing_m,
         )
 
+    @property
+    def eef_cost_factor(self) -> float:
+        """Compute the kg-fuel-equivalent cost per J of effective energy forcing."""
+        return self.dollar_tonne_co2e / (J_PER_TONNE_CO2 * self.dollar_kg_fuel)
+
     def __repr__(self) -> str:
         status = "solved" if self.result is not None else "unsolved"
         met = "with met" if self.met_lookup is not None else "no met"
@@ -1002,16 +1018,17 @@ class Optimizer:
 
         for _ in range(n_iter):
             state = solve_dag(
-                self.dag,
-                amass_init,
-                self.fl_choices,
-                self.mach_choices,
-                self.atyp,
-                self.cost_index,
-                self.origin.elevation_ft,
-                self.dest.elevation_ft,
-                self.takeoff_time,
-                self.met_lookup,
+                dag=self.dag,
+                amass_init=amass_init,
+                fl_choices=self.fl_choices,
+                mach_choices=self.mach_choices,
+                atyp=self.atyp,
+                cost_index=self.cost_index,
+                eef_cost_factor=self.eef_cost_factor,
+                origin_elev_ft=self.origin.elevation_ft,
+                dest_elev_ft=self.dest.elevation_ft,
+                takeoff_time=self.takeoff_time,
+                met_lookup=self.met_lookup,
             )
             ground_fi = len(self.fl_choices)
             amass_final = state.best_mass[self.dag.h_dest, ground_fi].item()
@@ -1261,16 +1278,17 @@ class Optimizer:
             cost_snapshots.append(state.best_cost[:, display_fl_idx].copy())
 
         solve_dag(
-            dag,
-            self.result.amass_init,
-            self.fl_choices,
-            self.mach_choices,
-            self.atyp,
-            self.cost_index,
-            self.origin.elevation_ft,
-            self.dest.elevation_ft,
-            self.takeoff_time,
-            self.met_lookup,
+            dag=dag,
+            amass_init=self.result.amass_init,
+            fl_choices=self.fl_choices,
+            mach_choices=self.mach_choices,
+            atyp=self.atyp,
+            cost_index=self.cost_index,
+            eef_cost_factor=self.eef_cost_factor,
+            origin_elev_ft=self.origin.elevation_ft,
+            dest_elev_ft=self.dest.elevation_ft,
+            takeoff_time=self.takeoff_time,
+            met_lookup=self.met_lookup,
             on_wavefront=capture,
         )
 
