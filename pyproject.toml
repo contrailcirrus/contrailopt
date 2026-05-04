@@ -10,7 +10,14 @@ dependencies = [
     "platformdirs",
     "pycontrails",
     "requests",
+    "scipy",
     "spherely",
+]
+
+[project.optional-dependencies]
+vis = [
+    "cartopy",
+    "matplotlib",
 ]
 
 [dependency-groups]

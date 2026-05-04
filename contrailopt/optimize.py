@@ -824,10 +824,10 @@ class Optimizer:
 
     Parameters
     ----------
-    origin_icao : str
-        ICAO code for the origin airport (e.g. ``"KLAX"``).
-    dest_icao : str
-        ICAO code for the destination airport.
+    origin_icao : str | AirportCoords
+        ICAO code for the origin airport (e.g. ``"KLAX"``), or an ``AirportCoords`` instance.
+    dest_icao : str | AirportCoords
+        ICAO code for the destination airport, or an ``AirportCoords`` instance.
     aircraft_type : str
         Aircraft type key in the PS model parameter table (e.g. ``"A320"``).
     takeoff_time : pd.Timestamp
@@ -1003,7 +1003,8 @@ class Optimizer:
 
         This method iteratively re-solves the DAG to converge on takeoff mass.
 
-        - Guess initial takeoff mass at 80% of the OEW-to-MTOW range
+        - Estimate trip fuel from great-circle distance and set initial takeoff mass
+          as ``landing mass + estimated trip fuel``, capped at MTOW
         - Solve the dynamic program to find the optimal path and trip fuel
         - Update takeoff mass as ``landing mass + trip fuel``, capped at MTOW
         - Stop after the takeoff mass estimate converges or after ``n_iter`` iterations
@@ -1199,14 +1200,14 @@ class Optimizer:
         time : pd.Timestamp or None
             Time to select. Snaps to the nearest available time step. If *None*,
             uses the first available time step.
-        ax : Axes or None
-            Cartopy axes to plot on. If None, calls ``self.dag.plot()`` to create one.
+        ax : GeoAxes or None
+            Cartopy GeoAxes to plot on. If None, calls ``self.dag.plot()`` to create one.
         **kwargs
             Passed to ``ax.quiver``.
 
         Returns
         -------
-        Axes
+        GeoAxes
             The axes with the met overlay.
         """
         if self.met_lookup is None:

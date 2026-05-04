@@ -206,7 +206,7 @@ class HorizontalDAG:
         -------
         flat_nbr : npt.NDArray[np.int64]
             ``(e,)`` neighbor indices for all edges leaving ``nodes``.
-        flat_dist : npt.NDArray[np.float64]
+        flat_dist : npt.NDArray[np.floating]
             ``(e,)`` edge distances in meters.
         src_idx : npt.NDArray[np.int64]
             ``(e,)`` index into ``nodes`` for each flat entry, so
@@ -354,9 +354,9 @@ class HorizontalDAG:
 
         Returns
         -------
-        sample_lon : npt.NDArray[np.float64]
+        sample_lon : npt.NDArray[np.floating]
             ``(s,)`` longitude of each sample point.
-        sample_lat : npt.NDArray[np.float64]
+        sample_lat : npt.NDArray[np.floating]
             ``(s,)`` latitude of each sample point.
         edge_idx : npt.NDArray[np.int64]
             ``(s,)`` edge index for each sample point.
@@ -747,7 +747,7 @@ class EdgeMetLookup:
             Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind"
         dag : HorizontalDAG
             Horizontal DAG whose edges will be sampled.
-        altitude_ft : npt.NDArray[np.float64]
+        altitude_ft : npt.NDArray[np.floating]
             An array of altitudes in feet to interpolate onto.
         takeoff_time : pd.Timestamp
             Departure time for the flight, used to select met time steps.
