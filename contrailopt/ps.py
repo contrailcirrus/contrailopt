@@ -153,7 +153,7 @@ def compute_climb_segment(
     npt.NDArray[np.floating],
     npt.NDArray[np.bool_],
 ]:
-    """Integrate climb from ``src_alt_ft`` to ``dst_alt_ft`` in 1000 ft steps.
+    """Integrate climb from ``src_alt_ft`` to ``dst_alt_ft`` in 2000 ft steps using a midpoint rule.
 
     Uses climb_performance at each step, accumulating distance, fuel, and time while
     updating mass for fuel burn. Climb uses a fixed fraction of maximum continuous thrust
@@ -187,7 +187,7 @@ def compute_climb_segment(
         if not np.any(active):
             break
 
-        step = np.minimum(1000.0, dst_alt_ft[active] - alt_ft[active])
+        step = np.minimum(2000.0, dst_alt_ft[active] - alt_ft[active])
         mid_alt_ft = alt_ft[active] + step / 2.0
 
         air_temperature = units.m_to_T_isa(units.ft_to_m(mid_alt_ft)) + delta_isa[active]
