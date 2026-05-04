@@ -270,3 +270,43 @@ class TestFinalDescent:
         dist_1000, _, _ = final_descent(src_alt_ft, 1000.0, atyp)
         # 500 ft ground alt should interpolate between 0 and 1000
         assert dist_1000[0] < dist_500[0] < dist_0[0]
+
+
+@pytest.mark.parametrize(
+    "name", ["B738", "A320", "A20N", "A321", "A21N", "B38M", "B77W", "B789", "A333", "B752"]
+)
+def test_climb_fuel_per_meter_exceeds_cruise(name: str) -> None:
+    """Climbing typically burns more fuel per horizontal meter than level cruise."""
+    atyp = ps_aircraft_params.load_aircraft_engine_params()[name]
+
+    base_fls = np.arange(28000.0, 40000.0, 1000.0)
+    target_fls = base_fls + 2000.0
+    machs = np.arange(atyp.m_des, atyp.max_mach_num - 0.01, 0.01)  # this can close to max mach
+    masses = np.arange(atyp.amass_mzfw, atyp.amass_mtow + 1.0, 5000.0)
+
+    # Climb: (n_fl, n_mass)
+    climb_dist, climb_fuel, _, _, climb_feas = compute_climb_segment(
+        base_fls[:, np.newaxis],
+        target_fls[:, np.newaxis],
+        masses[np.newaxis, :],
+        atyp,
+        delta_isa=0.0,
+        tailwind=0.0,
+    )
+    fuel_per_m_climb = np.where(climb_feas, climb_fuel / climb_dist, np.nan)
+
+    # Cruise: (n_fl, n_mass, n_mach)
+    T = units.m_to_T_isa(units.ft_to_m(base_fls))
+    ff, cruise_feas = cruise_performance(
+        base_fls[:, np.newaxis, np.newaxis],
+        machs[np.newaxis, np.newaxis, :],
+        masses[np.newaxis, :, np.newaxis],
+        T[:, np.newaxis, np.newaxis],
+        atyp,
+    )
+    tas = units.mach_number_to_tas(machs[np.newaxis, np.newaxis, :], T[:, np.newaxis, np.newaxis])
+    fuel_per_m_cruise = ff / tas
+
+    diff = fuel_per_m_climb[:, :, np.newaxis] - fuel_per_m_cruise
+    violations = (diff <= 0) & cruise_feas & climb_feas[:, :, np.newaxis]
+    assert not np.any(violations)
