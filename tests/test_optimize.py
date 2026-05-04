@@ -630,9 +630,10 @@ class TestOptimizer:
     def test_solve_converges(self) -> None:
         """Mass iteration converges within bounds."""
         opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"))
-        result = opt.solve(n_iter=5, payload=15_000.0)
+        result = opt.solve(payload=15_000.0)
         assert result.amass_init <= opt.atyp.amass_mtow
         assert result.landing_mass > opt.atyp.amass_oew
+        assert result.landing_mass < opt.atyp.amass_mlw
 
     def test_cost_index_update_on_solve(self) -> None:
         """Passing cost_index to solve updates the instance attribute."""

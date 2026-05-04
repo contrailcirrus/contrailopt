@@ -680,6 +680,27 @@ def _estimate_flight_hours(
     return int(np.ceil(dist / slow_gs / 3600.0))
 
 
+def _estimate_trip_fuel(
+    origin: AirportCoords,
+    dest: AirportCoords,
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    landing_mass: float,
+) -> float:
+    """Estimate trip fuel from great-circle distance and PS cruise performance.
+
+    Uses a single cruise performance evaluation at FL350 and design Mach with
+    an estimated mid-flight mass to compute fuel per meter, then scales by
+    the great-circle distance. Assumes zero wind.
+    """
+    dist_m = geo.haversine(*origin.coords, *dest.coords).item()
+    mid_fl = 35_000.0
+    T_isa = units.m_to_T_isa(units.ft_to_m(mid_fl))
+    est_mass = 0.5 * (landing_mass + atyp.amass_mtow)
+    ff, _ = ps.cruise_performance(mid_fl, atyp.m_des, est_mass, T_isa, atyp)
+    tas = units.mach_number_to_tas(atyp.m_des, T_isa)
+    return (ff / tas * dist_m).item()
+
+
 def _estimate_mass(
     payload: float | None,
     origin_icao: str,
@@ -1014,7 +1035,9 @@ class Optimizer:
             self.atyp,
         )
         landing_mass = self.atyp.amass_oew + payload + reserve_fuel
-        amass_init = self.atyp.amass_oew + 0.8 * (self.atyp.amass_mtow - self.atyp.amass_oew)
+
+        fuel_estimate = _estimate_trip_fuel(self.origin, self.dest, self.atyp, landing_mass)
+        amass_init = min(landing_mass + fuel_estimate, self.atyp.amass_mtow)
 
         for _ in range(n_iter):
             state = solve_dag(
