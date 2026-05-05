@@ -3,7 +3,13 @@
 from importlib import metadata
 
 from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
-from contrailopt.optimize import DAGResult, DAGState, Optimizer, cruise_flight_levels
+from contrailopt.optimize import (
+    DAGResult,
+    DAGState,
+    Optimizer,
+    cruise_flight_levels,
+    estimate_flight_hours,
+)
 from contrailopt.waypoints import load_faa_waypoints
 
 __version__ = metadata.version("contrailopt")
@@ -16,5 +22,6 @@ __all__ = [
     "HorizontalDAG",
     "Optimizer",
     "cruise_flight_levels",
+    "estimate_flight_hours",
     "load_faa_waypoints",
 ]

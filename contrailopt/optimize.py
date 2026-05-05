@@ -665,17 +665,36 @@ def solve_dag(
     return state
 
 
-def _estimate_flight_hours(
+def estimate_flight_hours(
     origin: AirportCoords,
     dest: AirportCoords,
-    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    mach_number: float = 0.75,
+    max_headwind: float = 40.0,
 ) -> int:
-    """Estimate upper-bound flight duration in hours for met time window."""
+    """Estimate upper-bound flight duration in hours.
+
+    Computes the worst-case flight time assuming the aircraft flies at
+    ``mach_number`` at FL400 with a sustained headwind of ``max_headwind``.
+
+    Parameters
+    ----------
+    origin : AirportCoords
+        Origin airport.
+    dest : AirportCoords
+        Destination airport.
+    mach_number : float, default 0.75
+        Cruise Mach number. Use the slowest aircraft's design Mach minus a margin.
+    max_headwind : float, default 40.0
+        Assumed maximum sustained headwind in m/s.
+
+    Returns
+    -------
+    int
+        Ceiling of estimated flight time in hours.
+    """
     dist = geo.haversine(*origin.coords, *dest.coords)
-    min_mach = atyp.m_des - 0.03
     T_cold = units.m_to_T_isa(units.ft_to_m(40_000.0))
-    min_tas = units.mach_number_to_tas(min_mach, T_cold)
-    max_headwind = 70.0  # m/s, strong jet stream
+    min_tas = units.mach_number_to_tas(mach_number, T_cold)
     slow_gs = min_tas - max_headwind
     return int(np.ceil(dist / slow_gs / 3600.0))
 
@@ -913,7 +932,9 @@ class Optimizer:
         self.mach_choices = _mach_choices(self.atyp)
 
         if met is not None:
-            flight_hours = flight_hours or _estimate_flight_hours(self.origin, self.dest, self.atyp)
+            flight_hours = flight_hours or estimate_flight_hours(
+                self.origin, self.dest, self.atyp.m_des
+            )
             self.met_lookup = EdgeMetLookup.from_met(
                 met=met,
                 dag=self.dag,

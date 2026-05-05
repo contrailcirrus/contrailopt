@@ -791,7 +791,7 @@ class EdgeMetLookup:
         # Downselect met in time
         if takeoff_time.tzinfo:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
-        times = pd.date_range(takeoff_time, periods=flight_hours, freq="h")
+        times = pd.date_range(takeoff_time, periods=flight_hours + 1, freq="h")
         available = pd.DatetimeIndex(ds["time"])
         usable = times[times.isin(available)]
 

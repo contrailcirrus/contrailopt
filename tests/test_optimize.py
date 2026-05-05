@@ -18,12 +18,12 @@ from contrailopt.optimize import (
     _compute_edge_climbs,
     _compute_ground_climbs,
     _cruise_zone_weights,
-    _estimate_flight_hours,
     _estimate_mass,
     _estimate_sample_times,
     _expand_edge_samples,
     _isa_cruise,
     cruise_flight_levels,
+    estimate_flight_hours,
     solve_dag,
 )
 
@@ -487,7 +487,7 @@ class TestSolveDag:
 
 
 class TestEstimateFlightHours:
-    def test_returns_positive_int(self, atyp: PSParams) -> None:
+    def test_returns_positive_int(self) -> None:
         """Cross-country flight estimate is a positive integer."""
         origin = AirportCoords(
             icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
@@ -495,17 +495,17 @@ class TestEstimateFlightHours:
         dest = AirportCoords(
             icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128.0
         )
-        hours = _estimate_flight_hours(origin, dest, atyp)
+        hours = estimate_flight_hours(origin, dest)
         assert isinstance(hours, int)
         assert hours > 0
 
-    def test_short_flight(self, atyp: PSParams) -> None:
+    def test_short_flight(self) -> None:
         """Short regional flight still estimates at least 1 hour."""
         origin = AirportCoords(
             icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
         )
         dest = AirportCoords(icao_code="KBOS", longitude=-71.01, latitude=42.36, elevation_ft=20.0)
-        hours = _estimate_flight_hours(origin, dest, atyp)
+        hours = estimate_flight_hours(origin, dest)
         assert hours >= 1
 
 
