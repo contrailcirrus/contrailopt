@@ -746,6 +746,15 @@ def _fl_choices(origin: AirportCoords, dest: AirportCoords) -> npt.NDArray[FLOAT
     return np.arange(start, 42_000.0, 2000.0, dtype=FLOAT_DTYPE)
 
 
+def _mach_choices(atyp: ps_aircraft_params.PSAircraftEngineParams) -> npt.NDArray[FLOAT_DTYPE]:
+    return np.arange(
+        atyp.m_des // 0.01 * 0.01,  # floor to 2 decimal places
+        atyp.max_mach_num,  # not inclusive
+        0.01,
+        dtype=FLOAT_DTYPE,
+    )
+
+
 def cruise_flight_levels(
     origin_icao: str | AirportCoords,
     dest_icao: str | AirportCoords,
@@ -851,6 +860,11 @@ class Optimizer:
         fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
     met_spacing_m : float, default 20_000.0
         Spacing in meters between met sample points along each edge.
+    flight_hours : int or None, default None
+        Upper-bound flight duration in hours for met time window. If None, estimated from
+        the aircraft type. Providing an explicit value decouples the met lookup from the
+        aircraft, allowing the user to call the ``solve()`` method with a different aircraft
+        type without re-initializing the optimizer.
     avoidance_regions : list of polygon coordinate lists, or None
         Polygons to exclude from the search, defined as lists of ``(lon, lat)`` vertices.
         Edges intersecting any polygon are removed and the DAG is re-pruned.
@@ -869,6 +883,7 @@ class Optimizer:
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
         met_spacing_m: float = 20_000.0,
+        flight_hours: int | None = None,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
     ) -> None:
         self.origin = (
@@ -895,15 +910,10 @@ class Optimizer:
         self.avoidance_regions = avoidance_regions
 
         self.fl_choices = cruise_flight_levels(origin_icao, dest_icao)
-        self.mach_choices = np.arange(
-            self.atyp.m_des // 0.01 * 0.01 - 0.02,  # floor to 2 decimal places, minus a margin
-            self.atyp.max_mach_num + 0.01,
-            0.01,
-            dtype=FLOAT_DTYPE,
-        )
+        self.mach_choices = _mach_choices(self.atyp)
 
         if met is not None:
-            flight_hours = _estimate_flight_hours(self.origin, self.dest, self.atyp)
+            flight_hours = flight_hours or _estimate_flight_hours(self.origin, self.dest, self.atyp)
             self.met_lookup = EdgeMetLookup.from_met(
                 met=met,
                 dag=self.dag,
@@ -997,6 +1007,8 @@ class Optimizer:
         self,
         n_iter: int = 3,
         cost_index: float | None = None,
+        dollar_tonne_co2e: float | None = None,
+        aircraft_type: str | None = None,
         payload: float | None = None,
     ) -> DAGResult:
         """Solve the trajectory optimization via shortest-path dynamic programming on the DAG.
@@ -1016,6 +1028,14 @@ class Optimizer:
         cost_index : float or None, default None
             If provided, updates ``self.cost_index`` before solving. This parameter is safe to vary
             between calls without rebuilding intermediate artifacts.
+        dollar_tonne_co2e : float or None, default None
+            If provided, updates ``self.dollar_tonne_co2e`` before solving. Safe to vary between
+            calls without rebuilding intermediate artifacts.
+        aircraft_type : str or None, default None
+            If provided, updates ``self.aircraft_type``, ``self.atyp``, and ``self.mach_choices``
+            before solving. Safe to vary between calls without rebuilding the DAG or met lookup
+            provided the met lookup was built with a sufficiently long ``flight_hours`` window
+            to accommodate the new aircraft's speed.
         payload : float or None, default None
             Aircraft payload in kg if known. If None, this is estimated with pycontrails.
 
@@ -1026,6 +1046,12 @@ class Optimizer:
         """
         if cost_index is not None:
             self.cost_index = cost_index
+        if dollar_tonne_co2e is not None:
+            self.dollar_tonne_co2e = dollar_tonne_co2e
+        if aircraft_type is not None:
+            self.aircraft_type = aircraft_type
+            self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
+            self.mach_choices = _mach_choices(self.atyp)
 
         payload, reserve_fuel = _estimate_mass(
             payload,
@@ -1151,6 +1177,11 @@ class Optimizer:
             A Flight with an additional ``mach_number`` column for cruise Mach number on each leg.
         """
         path_h, path_fl_idx, mach_number = self.reconstruct_path()
+
+        # Shift mach from incoming-leg to departing-leg semantics
+        mach_number[:-1] = mach_number[1:]
+        mach_number[-1] = 0.0
+
         state = self.result.state
         dag = self.dag
         ground_fi = len(self.fl_choices)

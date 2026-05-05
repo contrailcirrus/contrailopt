@@ -635,12 +635,6 @@ class TestOptimizer:
         assert result.landing_mass > opt.atyp.amass_oew
         assert result.landing_mass < opt.atyp.amass_mlw
 
-    def test_cost_index_update_on_solve(self) -> None:
-        """Passing cost_index to solve updates the instance attribute."""
-        opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"), cost_index=60.0)
-        opt.solve(n_iter=1, cost_index=120.0, payload=15_000.0)
-        assert opt.cost_index == 120.0
-
     def test_to_flight(self) -> None:
         """The to_flight returns a Flight with expected structure."""
         opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"))
@@ -651,8 +645,52 @@ class TestOptimizer:
         assert len(fl) >= 2
 
         assert "mach_number" in fl
+        assert np.all(np.isfinite(fl["mach_number"]))
         assert fl["longitude"][0] == pytest.approx(opt.origin.longitude, abs=0.01)
         assert fl["latitude"][0] == pytest.approx(opt.origin.latitude, abs=0.01)
         assert fl["longitude"][-1] == pytest.approx(opt.dest.longitude, abs=0.01)
         assert fl["latitude"][-1] == pytest.approx(opt.dest.latitude, abs=0.01)
         assert pd.DatetimeIndex(fl["time"]).is_monotonic_increasing
+
+    @pytest.fixture
+    def simple_opt(self) -> Optimizer:
+        """Optimizer with a minimal 3-node DAG for fast solve tests."""
+        origin = AirportCoords.from_icao("KORD")
+        dest = AirportCoords.from_icao("KBOS")
+        mid_lon = (origin.longitude + dest.longitude) / 2.0
+        mid_lat = (origin.latitude + dest.latitude) / 2.0
+        dag = HorizontalDAG.from_points(
+            np.array([origin.longitude, mid_lon, dest.longitude], dtype=FLOAT_DTYPE),
+            np.array([origin.latitude, mid_lat, dest.latitude], dtype=FLOAT_DTYPE),
+            max_dist_m=800_000.0,
+        )
+        return Optimizer(origin, dest, "A320", pd.Timestamp("2024-06-01"), dag=dag)
+
+    def test_cost_index_override(self, simple_opt: Optimizer) -> None:
+        """Passing cost_index to solve updates the instance attribute."""
+        simple_opt.solve(n_iter=1, cost_index=120.0, payload=15_000.0)
+        assert simple_opt.cost_index == 120.0
+        assert simple_opt.result.trip_fuel > 0.0
+
+    def test_aircraft_type_override(self, simple_opt: Optimizer) -> None:
+        """Passing aircraft_type to solve switches atyp and mach_choices."""
+        simple_opt.solve(n_iter=1, payload=15_000.0)
+        fuel_a320 = simple_opt.result.trip_fuel
+
+        simple_opt.solve(n_iter=1, aircraft_type="B738", payload=15_000.0)
+        assert simple_opt.aircraft_type == "B738"
+        assert simple_opt.result.trip_fuel != pytest.approx(fuel_a320, rel=0.01)
+
+    def test_flight_hours_override(self, simple_opt: Optimizer) -> None:
+        """Explicit flight_hours in constructor does not break solve."""
+        # Rebuild with flight_hours set; reuse the same dag
+        opt = Optimizer(
+            simple_opt.origin,
+            simple_opt.dest,
+            simple_opt.aircraft_type,
+            simple_opt.takeoff_time,
+            dag=simple_opt.dag,
+            flight_hours=8,
+        )
+        result = opt.solve(n_iter=1, payload=15_000.0)
+        assert result.trip_fuel > 0.0
