@@ -828,19 +828,9 @@ class EdgeMetLookup:
             ds = ds.interp(altitude_ft=altitude_ft)
 
         # Interpolate horizontally onto sample points
-        ds = ds.interp(
-            longitude=xr.DataArray(sample_lon, dims="sample"),
-            latitude=xr.DataArray(sample_lat, dims="sample"),
-        )
-
-        # Load the data into memory here (we freely access ds.values in __call__)
-        ds.load()
-
-        # Keep the original dtype (interp promotes to float64), which we assume is float32
-        # If we're given float64 met, we can run into issues if optimize.py assumes float32
-        # This needs to happen after load because dask doesn't understand interp promotes
-        for var in ds:
-            ds[var] = ds[var].astype(np.float32)
+        # Calling ds.interp chews up too much memory and the pycontrails RGI isn't
+        # exactly designed for this, so just call custom numpy-based _bilinear_interp
+        ds = _bilinear_interp(ds, sample_lon, sample_lat)
 
         return cls(
             ds=ds,
@@ -911,3 +901,61 @@ def _dual_az_edges(
     edges = np.column_stack([tail[keep], head[keep]])
     edge_dist = dist[tail[keep], head[keep]]
     return edges, edge_dist
+
+
+def _bilinear_interp(
+    ds: xr.Dataset,
+    sample_lon: npt.NDArray[np.floating],
+    sample_lat: npt.NDArray[np.floating],
+) -> xr.Dataset:
+    """Bilinear interpolation of ds onto sample points without full-grid intermediates.
+
+    Assumes ds has dimensions (time, altitude_ft, latitude, longitude) and that
+    longitude and latitude coordinates are regularly spaced and ascending.
+
+    Returns a Dataset with a "sample" dimension replacing longitude/latitude.
+    """
+    lon_coord = ds["longitude"].values
+    lat_coord = ds["latitude"].values
+
+    # Find bounding indices
+    i = np.searchsorted(lon_coord, sample_lon) - 1
+    j = np.searchsorted(lat_coord, sample_lat) - 1
+    np.clip(i, 0, len(lon_coord) - 2, out=i)
+    np.clip(j, 0, len(lat_coord) - 2, out=j)
+
+    # Fractional weights
+    wx = (sample_lon - lon_coord[i]) / (lon_coord[i + 1] - lon_coord[i])
+    wy = (sample_lat - lat_coord[j]) / (lat_coord[j + 1] - lat_coord[j])
+
+    wx = wx.astype(np.float32)[:, np.newaxis, np.newaxis]
+    wy = wy.astype(np.float32)[:, np.newaxis, np.newaxis]
+
+    result_vars = {}
+    for name, da in ds.items():
+        # data shape: (longitude, latitude, altitude_ft, time)
+        if da.dims != ("longitude", "latitude", "altitude_ft", "time"):
+            raise ValueError(f"Unexpected dimensions for variable {name}: {da.dims}")
+
+        v = da.values  # this materializes data into memory if not already loaded
+        f00 = v[i, j]
+        f01 = v[i + 1, j]
+        f10 = v[i, j + 1]
+        f11 = v[i + 1, j + 1]
+
+        val = (
+            (1.0 - wx) * (1.0 - wy) * f00
+            + wx * (1.0 - wy) * f01
+            + (1.0 - wx) * wy * f10
+            + wx * wy * f11
+        )
+        result_vars[name] = (("sample", "altitude_ft", "time"), val)
+
+    return xr.Dataset(
+        result_vars,
+        coords={
+            "sample": np.arange(len(sample_lon), dtype=np.int64),
+            "altitude_ft": ds["altitude_ft"],
+            "time": ds["time"],
+        },
+    )
