@@ -821,9 +821,14 @@ class EdgeMetLookup:
         ds_altitude_ft = units.pl_to_ft(ds["level"])
         ds = ds.assign_coords(altitude_ft=ds_altitude_ft).swap_dims(level="altitude_ft")
 
-        # Interpolate horizontally onto sample points and vertically onto FL choices
+        # Select or interpolate vertically on FL choices
+        try:
+            ds = ds.sel(altitude_ft=altitude_ft, method="nearest", tolerance=50.0)
+        except KeyError:
+            ds = ds.interp(altitude_ft=altitude_ft)
+
+        # Interpolate horizontally onto sample points
         ds = ds.interp(
-            altitude_ft=altitude_ft,
             longitude=xr.DataArray(sample_lon, dims="sample"),
             latitude=xr.DataArray(sample_lat, dims="sample"),
         )
