@@ -732,7 +732,7 @@ class EdgeMetLookup:
     @classmethod
     def from_met(
         cls,
-        met: MetDataset,
+        met: MetDataset | xr.Dataset,
         dag: HorizontalDAG,
         altitude_ft: npt.NDArray[np.floating],
         takeoff_time: pd.Timestamp,
@@ -743,8 +743,11 @@ class EdgeMetLookup:
 
         Parameters
         ----------
-        met : MetDataset
-            Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind"
+        met : MetDataset | xr.Dataset
+            Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind".
+            If "eef_per_m" is present, it will also be included in the output.
+            Either a pycontrails ``MetDataset`` or a raw ``xr.Dataset`` with similar
+            structure can be passed.
         dag : HorizontalDAG
             Horizontal DAG whose edges will be sampled.
         altitude_ft : npt.NDArray[np.floating]
@@ -783,10 +786,12 @@ class EdgeMetLookup:
         sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
 
         # Ensure variables
+        ds = met.data if isinstance(met, MetDataset) else met
+
         variables = ["air_temperature", "eastward_wind", "northward_wind"]
-        if "eef_per_m" in met:
+        if "eef_per_m" in ds:
             variables.append("eef_per_m")
-        ds = met.data[variables]
+        ds = ds[variables]
 
         # Downselect met in time
         if takeoff_time.tzinfo:

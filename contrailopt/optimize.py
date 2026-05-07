@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Self
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+import xarray as xr
 from pycontrails import Flight, MetDataset
 from pycontrails.core import airports
 from pycontrails.models.ps_model import ps_aircraft_params
@@ -860,7 +861,7 @@ class Optimizer:
         Aircraft type key in the PS model parameter table (e.g. ``"A320"``).
     takeoff_time : pd.Timestamp
         Departure time, used for met interpolation.
-    met : MetDataset or None, default None
+    met : MetDataset | xr.Dataset | None, default None
         Gridded met data with ``air_temperature``, ``eastward_wind``, and ``northward_wind``.
         If *None*, cruise performance uses ISA temperatures and zero wind.
     dag : HorizontalDAG or None, default None
@@ -896,7 +897,7 @@ class Optimizer:
         aircraft_type: str,
         takeoff_time: pd.Timestamp,
         *,
-        met: MetDataset | None = None,
+        met: MetDataset | xr.Dataset | None = None,
         dag: HorizontalDAG | None = None,
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
@@ -956,7 +957,7 @@ class Optimizer:
         dest_icao: str | None = None,
         aircraft_type: str | None = None,
         *,
-        met: MetDataset | None = None,
+        met: MetDataset | xr.Dataset | None = None,
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
