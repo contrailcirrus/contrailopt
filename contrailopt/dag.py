@@ -826,6 +826,9 @@ class EdgeMetLookup:
             ds = ds.sel(altitude_ft=altitude_ft, method="nearest", tolerance=50.0)
         except KeyError:
             ds = ds.interp(altitude_ft=altitude_ft)
+            # Ensure float32 — interp promotes to float64
+            for var in ds:
+                ds[var] = ds[var].astype(np.float32)
 
         # Interpolate horizontally onto sample points
         # Calling ds.interp chews up too much memory and the pycontrails RGI isn't
