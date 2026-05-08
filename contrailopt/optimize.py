@@ -35,6 +35,7 @@ _WAYPOINT_DTYPE = np.dtype(
         ("eastward_wind", FLOAT_DTYPE),
         ("northward_wind", FLOAT_DTYPE),
         ("node_index", np.int64),
+        ("sample_index", np.int64),
     ]
 )
 
@@ -1335,6 +1336,7 @@ class Optimizer:
         if not skip_first:
             out["node_index"][0] = h_src
         out["node_index"][-1] = h_dst
+        out["sample_index"] = sample_idxs
         return out
 
     def to_flight(self) -> Flight:
@@ -1369,7 +1371,11 @@ class Optimizer:
                 latitude=dag.lat[path_h],
                 altitude_ft=altitude_ft,
                 time=time,
-                data={"mach_number": path_mach, "node_index": path_h},
+                data={
+                    "mach_number": path_mach,
+                    "node_index": path_h,
+                    "sample_index": np.full(len(path_h), -1, dtype=np.int64),
+                },
                 aircraft_type=self.aircraft_type,
             )
 
@@ -1396,6 +1402,7 @@ class Optimizer:
             "northward_wind": wpts["northward_wind"],
         }
         data["node_index"] = wpts["node_index"]
+        data["sample_index"] = wpts["sample_index"]
         if "eef_per_m" in self.met_lookup.ds:
             data["eef_per_m"] = wpts["eef_per_m"]
 
