@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-from pycontrails import MetDataset
+from pycontrails import Flight, MetDataset
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.models.ps_model.ps_aircraft_params import PSAircraftEngineParams as PSParams
 from pycontrails.physics import units
@@ -175,3 +175,115 @@ class TestStepDown:
         assert n_finite == len(fl_choices), (
             f"Only {n_finite}/{len(fl_choices)} FLs reached destination: {dest_costs}"
         )
+
+
+class TestToFlight:
+    """Verify to_flight() produces a valid Flight with met-derived fields."""
+
+    def test_to_flight_structure(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+    ) -> None:
+        """to_flight returns a Flight with expected columns and endpoints."""
+        origin, dest = route
+
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+        )
+        opt.solve(n_iter=2, payload=15_000.0)
+        fl = opt.to_flight()
+
+        assert isinstance(fl, Flight)
+        assert len(fl) > 20  # densified waypoints, not just DAG nodes
+
+        # Required columns present and finite
+        for col in ("mach_number", "air_temperature", "eastward_wind", "northward_wind"):
+            assert col in fl, f"Missing column: {col}"
+            assert np.all(np.isfinite(fl[col])), f"Non-finite values in {col}"
+
+        # Endpoints match origin/dest
+        assert fl["longitude"][0] == pytest.approx(origin.longitude, abs=0.1)
+        assert fl["latitude"][0] == pytest.approx(origin.latitude, abs=0.1)
+        assert fl["longitude"][-1] == pytest.approx(dest.longitude, abs=0.1)
+        assert fl["latitude"][-1] == pytest.approx(dest.latitude, abs=0.1)
+
+        # Time is monotonically increasing
+        assert pd.DatetimeIndex(fl["time"]).is_monotonic_increasing
+
+    def test_to_flight_altitude_profile(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+    ) -> None:
+        """Altitude starts at origin elevation, reaches cruise, ends at dest elevation."""
+        origin, dest = route
+
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+        )
+        opt.solve(n_iter=2, payload=15_000.0)
+        fl = opt.to_flight()
+
+        alt = fl["altitude_ft"]
+        assert alt[0] == pytest.approx(origin.elevation_ft, abs=1.0)
+        assert alt[-1] == pytest.approx(dest.elevation_ft, abs=1.0)
+        assert np.max(alt) >= 30_000.0  # reaches cruise
+        assert np.all(np.isfinite(alt))
+
+    def test_to_flight_with_eef(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+    ) -> None:
+        """to_flight includes eef_per_m when met contains it."""
+        origin, dest = route
+
+        # Add a spatially varying eef_per_m field to the met dataset
+        ds = met.data
+        shape = ds["air_temperature"].shape
+        # Positive EEF in the western half, negative in the east
+        lons = ds["longitude"].values
+        eef_sign = np.where(lons < -80.0, 1.0, -1.0)
+        eef_per_m = np.broadcast_to(
+            (eef_sign * 1e-9)[:, np.newaxis, np.newaxis, np.newaxis], shape
+        ).astype(np.float32)
+        ds_eef = ds.assign(eef_per_m=(ds["air_temperature"].dims, eef_per_m))
+        met_eef = MetDataset(ds_eef)
+
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met_eef,
+            dag=line_dag,
+            cost_index=30.0,
+            dollar_tonne_co2e=100.0,
+            met_spacing_m=40_000.0,
+        )
+        opt.solve(n_iter=2, payload=15_000.0)
+        fl = opt.to_flight()
+
+        assert "eef_per_m" in fl
+        assert np.all(np.isfinite(fl["eef_per_m"]))
+        # Should contain both positive and negative values given the spatial pattern
+        assert np.any(fl["eef_per_m"] > 0)
+        assert np.any(fl["eef_per_m"] < 0)

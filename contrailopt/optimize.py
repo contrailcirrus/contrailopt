@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 
 FLOAT_DTYPE = np.float32
 
+_WAYPOINT_DTYPE = np.dtype(
+    [
+        ("longitude", FLOAT_DTYPE),
+        ("latitude", FLOAT_DTYPE),
+        ("altitude_ft", FLOAT_DTYPE),
+        ("elapsed_s", FLOAT_DTYPE),
+        ("mach_number", FLOAT_DTYPE),
+        ("eef_per_m", FLOAT_DTYPE),
+        ("air_temperature", FLOAT_DTYPE),
+        ("eastward_wind", FLOAT_DTYPE),
+        ("northward_wind", FLOAT_DTYPE),
+        ("node_index", np.int64),
+    ]
+)
+
 # IPCC AR5 reference AGWP100: https://www.ipcc.ch/site/assets/uploads/2018/07/WGI_AR5.Chap_.8_SM.pdf
 _AGWP_CO2 = 91.7e-15  # W m-2 yr kg-1
 _SECONDS_PER_YEAR = 60 * 60 * 24 * 365  # s yr-1
@@ -260,6 +275,8 @@ class DAGState:
     best_mass: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival mass at each state
     best_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival time in seconds from takeoff
     best_mach: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) incoming cruise mach
+    best_climb_dist: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb distance on incoming edge
+    best_climb_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb time on incoming edge
     best_prev_h: npt.NDArray[np.int64]  # (n_h, n_fl) previous horizontal node, -1 = no predecessor
     best_prev_fi: npt.NDArray[np.int64]  # (n_h, n_fl) previous fl index, -1 = came from origin
 
@@ -271,6 +288,8 @@ class DAGState:
             best_mass=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_mach=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
+            best_climb_dist=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
+            best_climb_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_prev_h=np.full((n_h, n_cols), -1, dtype=np.int64),
             best_prev_fi=np.full((n_h, n_cols), -1, dtype=np.int64),
         )
@@ -597,6 +616,8 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     state.best_mass[flat_nbr[wi], wj] = arrival_mass[wi, wj]
     state.best_time[flat_nbr[wi], wj] = arrival_time[wi, wj]
     state.best_mach[flat_nbr[wi], wj] = best_mach[wi, wj]
+    state.best_climb_dist[flat_nbr[wi], wj] = climb_dist[wi, wj]
+    state.best_climb_time[flat_nbr[wi], wj] = climb_time[wi, wj]
     state.best_prev_h[flat_nbr[wi], wj] = h_idxs[src_idx[wi]]
     state.best_prev_fi[flat_nbr[wi], wj] = fl_idxs[src_idx[wi]]
 
@@ -654,14 +675,17 @@ def solve_dag(
             on_wavefront(wave, state)
 
     # Populate destination ground slot from best FL
-    best_dest_fi = np.argmin(state.best_cost[dag.h_dest, :n_fl]).item()
-    if np.isfinite(state.best_cost[dag.h_dest, best_dest_fi]):
-        state.best_cost[dag.h_dest, ground_fi] = state.best_cost[dag.h_dest, best_dest_fi]
-        state.best_mass[dag.h_dest, ground_fi] = state.best_mass[dag.h_dest, best_dest_fi]
-        state.best_time[dag.h_dest, ground_fi] = state.best_time[dag.h_dest, best_dest_fi]
-        state.best_mach[dag.h_dest, ground_fi] = state.best_mach[dag.h_dest, best_dest_fi]
-        state.best_prev_h[dag.h_dest, ground_fi] = state.best_prev_h[dag.h_dest, best_dest_fi]
-        state.best_prev_fi[dag.h_dest, ground_fi] = state.best_prev_fi[dag.h_dest, best_dest_fi]
+    h_dest = dag.h_dest
+    best_dest_fi = np.argmin(state.best_cost[h_dest, :n_fl]).item()
+    if np.isfinite(state.best_cost[h_dest, best_dest_fi]):
+        state.best_cost[h_dest, ground_fi] = state.best_cost[h_dest, best_dest_fi]
+        state.best_mass[h_dest, ground_fi] = state.best_mass[h_dest, best_dest_fi]
+        state.best_time[h_dest, ground_fi] = state.best_time[h_dest, best_dest_fi]
+        state.best_mach[h_dest, ground_fi] = state.best_mach[h_dest, best_dest_fi]
+        state.best_climb_dist[h_dest, ground_fi] = state.best_climb_dist[h_dest, best_dest_fi]
+        state.best_climb_time[h_dest, ground_fi] = state.best_climb_time[h_dest, best_dest_fi]
+        state.best_prev_h[h_dest, ground_fi] = state.best_prev_h[h_dest, best_dest_fi]
+        state.best_prev_fi[h_dest, ground_fi] = state.best_prev_fi[h_dest, best_dest_fi]
 
     return state
 
@@ -1141,7 +1165,7 @@ class Optimizer:
         Geographic coordinates for each waypoint are available via
         ``self.dag.lon[path_h]`` and ``self.dag.lat[path_h]``.
         Flight levels are ``self.fl_choices[path_fl_idx]`` for interior
-        waypoints; endpoints use a sentinel index (``len(fl_choices)``)
+        waypoints; the origin uses a sentinel index (``len(fl_choices)``)
         representing ground level.
 
         Returns
@@ -1150,8 +1174,9 @@ class Optimizer:
             Horizontal node indices along the path.
             The first and last entries are origin and destination.
         path_fl_idx : npt.NDArray[np.int64]
-            Flight level index at each node. Endpoints use a special convention
-            ``ground_fl_idx = len(fl_choices)``, interior nodes index into ``fl_choices``.
+            Flight level index at each node. The origin uses a sentinel
+            ``ground_fl_idx = len(fl_choices)``; the destination uses the
+            actual cruise FL from which the final descent begins.
         path_mach : npt.NDArray[FLOAT_DTYPE]
             Cruise Mach number on each incoming leg. The first entry ``path_mach[0]`` is NaN
             (no incoming leg at the origin).
@@ -1161,13 +1186,20 @@ class Optimizer:
 
         state = self.result.state
         dag = self.dag
-        ground_fi = len(self.fl_choices)
+        n_fl = len(self.fl_choices)
 
-        if not np.isfinite(state.best_cost[dag.h_dest, ground_fi]):
+        # Start at the best real FL at the destination — this is the FL the
+        # aircraft cruised at before the final descent. We don't start at the
+        # ground_fi sentinel because that hides which FL was actually used;
+        # the solver could step-climb on the final edge from path_fl_idx[-2]
+        # to a higher FL before descending, so the winning FL at the dest
+        # isn't necessarily the same as the penultimate node's FL.
+        best_dest_fi = np.argmin(state.best_cost[dag.h_dest, :n_fl]).item()
+        if not np.isfinite(state.best_cost[dag.h_dest, best_dest_fi]):
             raise ValueError("No feasible path to destination")
 
         path_h, path_fl_idx, path_mach = [], [], []
-        h, fi = dag.h_dest, ground_fi
+        h, fi = dag.h_dest, best_dest_fi
 
         while True:  # Infinite loop if dag isn't a DAG
             path_h.append(h)
@@ -1188,48 +1220,191 @@ class Optimizer:
 
         return np.array(path_h), np.array(path_fl_idx), np.array(path_mach)
 
+    def _edge_waypoints(
+        self,
+        h_src: int,
+        h_dst: int,
+        fi_src: int,
+        fi_dst: int,
+        edge_mach: float,
+        skip_first: bool,
+    ) -> npt.NDArray[_WAYPOINT_DTYPE]:
+        """Build densified waypoints for a single path edge using met sample points.
+
+        Returns a structured array with dtype ``_WAYPOINT_DTYPE``.
+        """
+        met_lookup = self.met_lookup
+        state = self.result.state
+        dag = self.dag
+        n_fl = len(self.fl_choices)
+        ground_fi = n_fl
+
+        t_src = state.best_time[h_src, fi_src]
+        t_dst = state.best_time[h_dst, fi_dst]
+
+        edge_idx = dag.edge_index(h_src, h_dst)
+        edge_dist = dag.edge_dist[edge_idx]
+
+        # Sample range (skip source on subsequent edges to avoid duplication)
+        s0 = met_lookup.edge_ptr[edge_idx]
+        s1 = met_lookup.edge_ptr[edge_idx + 1]
+        if skip_first:
+            s0 += 1
+        sample_idxs = np.arange(s0, s1)
+        n_samp = len(sample_idxs)
+        cum_dist = met_lookup.cum_dist[sample_idxs]
+
+        is_first = fi_src == ground_fi
+        is_last = h_dst == self.dag.h_dest
+        cruise_fi = fi_dst
+        cruise_fl = self.fl_choices[cruise_fi]
+
+        # Climb dist/time from the solver state at the destination node
+        climb_dist = state.best_climb_dist[h_dst, cruise_fi]
+        climb_time_s = state.best_climb_time[h_dst, cruise_fi]
+        src_alt = self.origin.elevation_ft if is_first else self.fl_choices[fi_src]
+
+        # Descent (final edge only)
+        if is_last:
+            fd_d, _, fd_t = ps.final_descent(
+                np.array([cruise_fl], dtype=FLOAT_DTYPE),
+                self.dest.elevation_ft,
+                self.atyp,
+            )
+            descent_dist = fd_d[0].item()
+            descent_time = fd_t[0].item()
+            dest_alt = self.dest.elevation_ft
+        else:
+            descent_dist = 0.0
+            descent_time = 0.0
+            dest_alt = cruise_fl
+
+        # --- Altitude profile ---
+        alt = np.full(n_samp, cruise_fl, dtype=FLOAT_DTYPE)
+        in_climb = cum_dist < climb_dist
+        if np.any(in_climb):
+            frac = cum_dist[in_climb] / climb_dist  # climb_dist > 0 holds
+            alt[in_climb] = src_alt + frac * (cruise_fl - src_alt)
+
+        descent_start = edge_dist - descent_dist
+        in_descent = np.zeros(n_samp, dtype=bool)
+        if is_last:
+            in_descent = cum_dist > descent_start
+            if np.any(in_descent):
+                frac = (cum_dist[in_descent] - descent_start) / descent_dist  # descent_dist > 0
+                alt[in_descent] = cruise_fl + frac * (dest_alt - cruise_fl)
+
+        # --- Time profile ---
+        edge_time = t_dst - t_src
+        cruise_time = edge_time - climb_time_s - descent_time  # must be non-negative
+        cruise_dist_total = descent_start - climb_dist
+        in_cruise = ~in_climb & ~in_descent
+
+        elapsed = np.empty(n_samp, dtype=FLOAT_DTYPE)
+        if np.any(in_climb):
+            elapsed[in_climb] = t_src + climb_time_s * (cum_dist[in_climb] / climb_dist)
+        if np.any(in_cruise):
+            cfrac = (cum_dist[in_cruise] - climb_dist) / cruise_dist_total
+            elapsed[in_cruise] = t_src + climb_time_s + cruise_time * cfrac
+        if np.any(in_descent):
+            dfrac = (cum_dist[in_descent] - descent_start) / descent_dist
+            elapsed[in_descent] = t_src + climb_time_s + cruise_time + descent_time * dfrac
+
+        # --- Met interpolation ---
+        times_dt = np.datetime64(self.takeoff_time) + (elapsed * 1e9).astype("timedelta64[ns]")
+        fl_arr = np.array([cruise_fi])
+        interp = met_lookup(sample_idxs, times_dt[:, np.newaxis], fl_idx=fl_arr)
+
+        eef_per_m = (
+            interp.eef_per_m[:, 0]
+            if interp.eef_per_m is not None
+            else np.zeros(n_samp, dtype=FLOAT_DTYPE)
+        )
+
+        out = np.empty(n_samp, dtype=_WAYPOINT_DTYPE)
+        out["longitude"] = met_lookup.sample_lon[sample_idxs]
+        out["latitude"] = met_lookup.sample_lat[sample_idxs]
+        out["altitude_ft"] = alt
+        out["elapsed_s"] = elapsed
+        out["mach_number"] = edge_mach
+        out["eef_per_m"] = eef_per_m
+        out["air_temperature"] = interp.air_temperature[:, 0]
+        out["eastward_wind"] = interp.eastward_wind[:, 0]
+        out["northward_wind"] = interp.northward_wind[:, 0]
+        out["node_index"] = -1
+        if not skip_first:
+            out["node_index"][0] = h_src
+        out["node_index"][-1] = h_dst
+        return out
+
     def to_flight(self) -> Flight:
         """Return the optimal trajectory as a `pycontrails.Flight`.
 
+        When met data is available, waypoints are emitted at each edge sample
+        point (~20 km spacing) with proper climb/descent altitude profiles and
+        per-sample ``eef_per_m``. Without met, falls back to one waypoint per
+        DAG node.
+
         The ``solve()`` method must be called first.
-
-        Returns
-        -------
-        Flight
-            A Flight with an additional ``mach_number`` column for cruise Mach number on each leg.
         """
-        path_h, path_fl_idx, mach_number = self.reconstruct_path()
-
-        # Shift mach from incoming-leg to departing-leg semantics
-        mach_number[:-1] = mach_number[1:]
-        mach_number[-1] = 0.0
-
+        path_h, path_fl_idx, path_mach = self.reconstruct_path()
         state = self.result.state
         dag = self.dag
-        ground_fi = len(self.fl_choices)
+        n_fl = len(self.fl_choices)
+        ground_fi = n_fl
 
-        lon = dag.lon[path_h]
-        lat = dag.lat[path_h]
+        if self.met_lookup is None:
+            # Shift mach from incoming-leg to departing-leg semantics
+            path_mach[:-1] = path_mach[1:]
+            path_mach[-1] = 0.0
 
-        altitude_ft = np.where(
-            path_fl_idx == ground_fi,
-            np.where(
-                np.arange(len(path_h)) == 0,
-                self.origin.elevation_ft,
-                self.dest.elevation_ft,
-            ),
-            self.fl_choices[np.clip(path_fl_idx, 0, ground_fi - 1)],
+            altitude_ft = self.fl_choices[np.minimum(path_fl_idx, ground_fi - 1)]
+            altitude_ft[0] = self.origin.elevation_ft
+            altitude_ft[-1] = self.dest.elevation_ft
+
+            elapsed_s = state.best_time[path_h, path_fl_idx]
+            time = self.takeoff_time + pd.to_timedelta(elapsed_s, unit="s")
+            return Flight(
+                longitude=dag.lon[path_h],
+                latitude=dag.lat[path_h],
+                altitude_ft=altitude_ft,
+                time=time,
+                data={"mach_number": path_mach, "node_index": path_h},
+                aircraft_type=self.aircraft_type,
+            )
+
+        wpts = np.concatenate(
+            [
+                self._edge_waypoints(
+                    path_h[k],
+                    path_h[k + 1],
+                    path_fl_idx[k],
+                    path_fl_idx[k + 1],
+                    path_mach[k + 1],
+                    skip_first=(k > 0),
+                )
+                for k in range(len(path_h) - 1)
+            ]
         )
 
-        elapsed_s = state.best_time[path_h, path_fl_idx]
-        time = self.takeoff_time + pd.to_timedelta(elapsed_s, unit="s")
+        time = self.takeoff_time + pd.to_timedelta(wpts["elapsed_s"], unit="s")
+
+        data: dict[str, npt.NDArray] = {
+            "mach_number": wpts["mach_number"],
+            "air_temperature": wpts["air_temperature"],
+            "eastward_wind": wpts["eastward_wind"],
+            "northward_wind": wpts["northward_wind"],
+        }
+        data["node_index"] = wpts["node_index"]
+        if "eef_per_m" in self.met_lookup.ds:
+            data["eef_per_m"] = wpts["eef_per_m"]
 
         return Flight(
-            longitude=lon,
-            latitude=lat,
-            altitude_ft=altitude_ft,
+            longitude=wpts["longitude"],
+            latitude=wpts["latitude"],
+            altitude_ft=wpts["altitude_ft"],
             time=time,
-            data={"mach_number": mach_number},
+            data=data,
             aircraft_type=self.aircraft_type,
         )
 
