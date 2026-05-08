@@ -188,6 +188,27 @@ class HorizontalDAG:
         """Return the neighbors of a specified node."""
         return self.adj[self.adj_ptr[i] : self.adj_ptr[i + 1]]
 
+    def edge_index(self, src: int, dst: int) -> int:
+        """Return the CSR index of the directed edge (src, dst).
+
+        Performs a linear scan over the neighbors of ``src``. This could be
+        replaced with ``np.searchsorted`` if needed, but that would require
+        enforcing sorted neighbors during construction.
+
+        Raises
+        ------
+        ValueError
+            If no edge from ``src`` to ``dst`` exists.
+        """
+        start = self.adj_ptr[src].item()
+        end = self.adj_ptr[src + 1]
+        row = self.adj[start:end]  # row = self.neighbors(src), but we need start again
+
+        pos = np.flatnonzero(row == dst)
+        if len(pos) == 0:
+            raise ValueError(f"No edge from {src} to {dst}")
+        return start + pos.item()
+
     def neighbors_batch(self, nodes: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
         """Return neighbors (duplicates included with multiplicity) for a batch of nodes."""
         return _neighbors_batch(self.adj_ptr, self.adj, nodes)
@@ -683,6 +704,7 @@ class EdgeMetLookup:
         self,
         sample_idxs: npt.NDArray[np.int64],
         times: npt.NDArray[np.datetime64],
+        fl_idx: npt.NDArray[np.int64] | None = None,
     ) -> EdgeInterpolation:
         """Interpolate all variables at given sample indices and times.
 
@@ -694,12 +716,15 @@ class EdgeMetLookup:
             2D array of time coordinates with shape ``(n_sample, n_fl)``, where
             ``n_sample = len(sample_idxs)``. Each FL gets its own query time
             (e.g. to account for FL-dependent climb duration).
+        fl_idx : npt.NDArray[np.int64] | None
+            Flight level indices into the ``altitude_ft`` dimension. If ``None``
+            (default), all FLs are returned with shape ``(n_sample, n_fl)``.
+            If an array, outputs are ``(n_sample, len(fl_idx))``.
 
         Returns
         -------
         EdgeInterpolation
-            Interpolated met fields at the requested sample and time coordinates,
-            each with shape ``(n_sample, n_fl)``.
+            Interpolated met fields at the requested sample and time coordinates.
         """
         time_coords = self.ds["time"].values  # (n_time,) datetime64[ns]
         time_s = (time_coords - time_coords[0]) / np.timedelta64(1, "s")
@@ -715,9 +740,10 @@ class EdgeMetLookup:
         t_hi = np.minimum(t_lo + 1, n_time - 1)
         w = t_frac - t_lo
 
+        fl_idx = np.arange(self.ds.sizes["altitude_ft"]) if fl_idx is None else fl_idx
+
         def _lerp(name: str) -> npt.NDArray[np.floating]:
             data = self.ds[name].values  # (n_total_samples, n_fl, n_time)
-            fl_idx = np.arange(data.shape[1])
             lo = data[sample_idxs[:, np.newaxis], fl_idx[np.newaxis, :], t_lo]
             hi = data[sample_idxs[:, np.newaxis], fl_idx[np.newaxis, :], t_hi]
             return lo + w * (hi - lo)

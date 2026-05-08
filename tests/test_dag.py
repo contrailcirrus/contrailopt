@@ -646,3 +646,31 @@ class TestFromFlight:
         # Calling prune raises since dest is unreachable
         with pytest.raises(ValueError, match="unreachable"):
             dag.prune()
+
+
+class TestEdgeIndex:
+    def test_known_edges(self, diamond: HorizontalDAG) -> None:
+        idx_01 = diamond.edge_index(0, 1)
+        idx_02 = diamond.edge_index(0, 2)
+        idx_13 = diamond.edge_index(1, 3)
+        idx_23 = diamond.edge_index(2, 3)
+
+        assert diamond.adj[idx_01] == 1
+        assert diamond.adj[idx_02] == 2
+        assert diamond.adj[idx_13] == 3
+        assert diamond.adj[idx_23] == 3
+
+    def test_no_edge_raises(self, diamond: HorizontalDAG) -> None:
+        with pytest.raises(ValueError, match="No edge from"):
+            diamond.edge_index(3, 0)
+
+    def test_consistent_with_edge_dist(self, diamond: HorizontalDAG) -> None:
+        idx = diamond.edge_index(0, 1)
+        assert diamond.edge_dist[idx] > 0.0
+
+    def test_all_edges_round_trip(self, lattice: HorizontalDAG) -> None:
+        pruned = lattice.prune()
+        edges = pruned.edges
+        for src, dst in edges:
+            idx = pruned.edge_index(src, dst)
+            assert pruned.adj[idx] == dst
