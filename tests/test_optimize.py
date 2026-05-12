@@ -570,7 +570,9 @@ class TestBuildDag:
             icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
         )
         dest = AirportCoords(icao_code="KBOS", longitude=-71.01, latitude=42.36, elevation_ft=20.0)
-        exist = HorizontalDAG.from_poisson(*origin.coords, *dest.coords, dtype=FLOAT_DTYPE).prune()
+        exist = HorizontalDAG.from_poisson(
+            *origin.coords, *dest.coords, dtype=FLOAT_DTYPE
+        ).prune_unreachable()
         dag = _build_dag(origin, dest, dag=exist, avoidance_regions=None)
         assert dag == exist
 
@@ -580,7 +582,7 @@ class TestBuildDag:
             icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
         )
         dest = AirportCoords(icao_code="KBOS", longitude=-71.01, latitude=42.36, elevation_ft=20.0)
-        wrong = HorizontalDAG.from_poisson(-118.0, 34.0, -87.0, 42.0).prune()
+        wrong = HorizontalDAG.from_poisson(-118.0, 34.0, -87.0, 42.0).prune_unreachable()
         with pytest.raises(ValueError, match="does not agree"):
             _build_dag(origin, dest, dag=wrong, avoidance_regions=None)
 

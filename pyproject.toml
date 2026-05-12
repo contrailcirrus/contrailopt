@@ -41,6 +41,7 @@ local_scheme = "no-local-version"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["error::UserWarning"]
 
 [tool.ruff]
 line-length = 100

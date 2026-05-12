@@ -83,20 +83,20 @@ class TestFromPoints:
         assert np.all(lattice.lon[edges[:, 1]] > lattice.lon[edges[:, 0]])
 
 
-class TestPrune:
+class TestPruneUnreachable:
     def test_diamond_already_pruned(self, diamond: HorizontalDAG) -> None:
-        pruned = diamond.prune()
+        pruned = diamond.prune_unreachable()
         assert pruned.n_nodes == diamond.n_nodes
         assert pruned.n_edges == diamond.n_edges
 
     def test_lattice_prune_removes_nodes(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         assert pruned.n_nodes == 127
         assert pruned.n_edges == 1240
         assert pruned.n_nodes < lattice.n_nodes
 
     def test_prune_connectivity(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         adj = pruned.adjacency_matrix()
 
         reachable = np.zeros(pruned.n_nodes, dtype=bool)
@@ -107,10 +107,53 @@ class TestPrune:
         assert reachable.all()
 
     def test_prune_idempotent(self, lattice: HorizontalDAG) -> None:
-        once = lattice.prune()
-        twice = once.prune()
+        once = lattice.prune_unreachable()
+        twice = once.prune_unreachable()
         assert once.n_nodes == twice.n_nodes
         assert once.n_edges == twice.n_edges
+
+
+class TestPruneEdges:
+    def test_removes_edges(self, lattice: HorizontalDAG) -> None:
+        pruned = lattice.prune_unreachable()
+        trimmed = pruned.prune_edges(degree=3)
+        assert trimmed.n_edges < pruned.n_edges
+
+    def test_preserves_connectivity(self, lattice: HorizontalDAG) -> None:
+        pruned = lattice.prune_unreachable()
+        trimmed = pruned.prune_edges(degree=3)
+        adj = trimmed.adjacency_matrix()
+
+        reachable = np.zeros(trimmed.n_nodes, dtype=bool)
+        reachable[trimmed.h_origin] = True
+        for _ in range(trimmed.n_nodes):
+            reachable |= adj[reachable].any(axis=0)
+
+        assert reachable[trimmed.h_dest]
+
+    def test_lower_degree_fewer_edges(self, lattice: HorizontalDAG) -> None:
+        pruned = lattice.prune_unreachable()
+        small = pruned.prune_edges(degree=2)
+        large = pruned.prune_edges(degree=5)
+        assert small.n_edges <= large.n_edges
+
+    def test_high_degree_is_noop(self, diamond: HorizontalDAG) -> None:
+        # Diamond max out-degree is 2 and max in-degree is 2, so degree=10 keeps everything
+        result = diamond.prune_edges(degree=10)
+        assert result.n_edges == diamond.n_edges
+
+    def test_degree_one_keeps_path(self, diamond: HorizontalDAG) -> None:
+        trimmed = diamond.prune_edges(degree=1)
+        assert trimmed.n_edges >= 2  # need at least 2 edges for origin -> dest
+
+    def test_every_node_has_outgoing_or_is_dest(self, lattice: HorizontalDAG) -> None:
+        pruned = lattice.prune_unreachable()
+        trimmed = pruned.prune_edges(degree=2)
+        od = trimmed.out_degree
+        # Every node except dest should have at least one outgoing edge
+        mask = np.ones(trimmed.n_nodes, dtype=bool)
+        mask[trimmed.h_dest] = False
+        assert np.all(od[mask] >= 1)
 
 
 class TestTopoWavefronts:
@@ -127,14 +170,14 @@ class TestTopoWavefronts:
         assert all_wave_nodes == set(range(diamond.n_nodes))
 
     def test_lattice_wavefront_count(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         waves = list(pruned.topo_wavefronts())
         assert len(waves) == 21
         assert waves[0].size == 1  # only origin in first wavefront
         assert waves[0].tolist() == [pruned.h_origin]
 
     def test_wavefronts_are_acyclic(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         waves = list(pruned.topo_wavefronts())
         adj = pruned.adjacency_matrix()
         for i in range(len(waves)):
@@ -144,7 +187,7 @@ class TestTopoWavefronts:
                         assert not adj[src, dst]
 
     def test_dest_in_last_wavefront(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         waves = list(pruned.topo_wavefronts())
         assert pruned.h_dest in waves[-1]
 
@@ -155,7 +198,7 @@ class TestEdgesProperty:
         assert edges.shape == (diamond.n_edges, 2)
 
     def test_edges_match_csr(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         edges = pruned.edges
         for i in range(pruned.n_nodes):
             nbrs = pruned.neighbors(i)
@@ -163,7 +206,7 @@ class TestEdgesProperty:
             assert set(nbrs) == set(edge_nbrs)
 
     def test_adjacency_matrix_consistent_with_edges(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         adj = pruned.adjacency_matrix()
         edges = pruned.edges
         for src, dst in edges:
@@ -210,7 +253,7 @@ class TestSampleEdges:
             assert sample_lat[e - 1] == pytest.approx(diamond.lat[diamond.adj[i]], abs=1e-6)
 
     def test_spacing_respected(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         _, _, _, edge_ptr = pruned.sample_edges(spacing_m=50_000.0)
         n_per_edge = np.diff(edge_ptr)
         assert np.all(n_per_edge >= 2)
@@ -239,7 +282,7 @@ class TestExcludePolygons:
             diamond.exclude_polygons([polygon])
 
     def test_polygon_blocks_edges(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
 
         # Block a small region that doesn't sever the graph
         polygon = [(49, 2), (51, 2), (51, 5), (49, 5)]
@@ -256,18 +299,18 @@ class TestExcludePolygons:
 
 class TestFromPoisson:
     def test_builds_connected_dag(self) -> None:
-        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune()
+        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune_unreachable()
         assert dag.n_nodes > 10
         assert dag.n_edges > dag.n_nodes
 
     def test_origin_and_dest_reachable(self) -> None:
-        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune()
+        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune_unreachable()
         waves = list(dag.topo_wavefronts())
         all_nodes = set(np.concatenate(waves).tolist())
         assert dag.h_dest in all_nodes
 
     def test_edge_distances_reasonable(self) -> None:
-        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune()
+        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6).prune_unreachable()
         assert np.all(dag.edge_dist > 0.0)
         assert np.all(dag.edge_dist < 600_000.0)
 
@@ -504,6 +547,29 @@ class TestEdgeMetLookup:
         assert result.air_temperature.shape == (2, 1)
         assert np.all(np.isfinite(result.air_temperature))
 
+    def test_no_met_overlap_raises(self, diamond: HorizontalDAG, mock_met: MetDataset) -> None:
+        with pytest.raises(ValueError, match="No met data available"):
+            EdgeMetLookup.from_met(
+                mock_met,
+                diamond,
+                np.array([30000.0]),
+                takeoff_time=pd.Timestamp("2099-01-01"),
+                flight_hours=4,
+                spacing_m=50_000.0,
+            )
+
+    def test_tz_aware_takeoff_time(self, diamond: HorizontalDAG, mock_met: MetDataset) -> None:
+        # 2023-12-31 21:00 US/Eastern = 2024-01-01 02:00 UTC, within mock met range
+        lookup = EdgeMetLookup.from_met(
+            mock_met,
+            diamond,
+            np.array([30000.0]),
+            takeoff_time=pd.Timestamp("2023-12-31 21:00", tz="US/Eastern"),
+            flight_hours=3,
+            spacing_m=50_000.0,
+        )
+        assert lookup.sample_lon.shape == lookup.sample_lat.shape
+
 
 class TestReverse:
     def test_edge_count_preserved(self, diamond: HorizontalDAG) -> None:
@@ -528,7 +594,7 @@ class TestReverse:
         np.testing.assert_allclose(orig_dists, rev_dists)
 
     def test_double_reverse_recovers_original(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         recovered = pruned.reverse().reverse()
         assert recovered.n_nodes == pruned.n_nodes
         assert recovered.n_edges == pruned.n_edges
@@ -539,7 +605,7 @@ class TestReverse:
         assert orig_edges == rec_edges
 
     def test_reverse_lattice_connectivity(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         rev = pruned.reverse()
         # In the reversed DAG, dest (now origin) should reach all nodes
         adj = rev.adjacency_matrix()
@@ -562,7 +628,7 @@ class TestOutDegree:
         np.testing.assert_array_equal(diamond.out_degree, [2, 1, 1, 0])
 
     def test_out_degree_lattice(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         assert pruned.out_degree.sum() == pruned.n_edges
         assert pruned.out_degree[pruned.h_dest] == 0
         assert pruned.out_degree[pruned.h_origin] > 0
@@ -589,7 +655,7 @@ class TestDisconnectedPrune:
         )
 
         with pytest.raises(ValueError, match="unreachable"):
-            dag.prune()
+            dag.prune_unreachable()
 
 
 class TestFromFlight:
@@ -636,7 +702,7 @@ class TestFromFlight:
 
     def test_prune_preserves_all(self, sample_flight: Flight) -> None:
         dag = HorizontalDAG.from_flight(sample_flight)  # this fails if max_dist_m too small
-        pruned = dag.prune()
+        pruned = dag.prune_unreachable()
         assert pruned.n_nodes == dag.n_nodes
 
     def test_small_max_dist_disconnects(self, sample_flight: Flight) -> None:
@@ -645,7 +711,7 @@ class TestFromFlight:
 
         # Calling prune raises since dest is unreachable
         with pytest.raises(ValueError, match="unreachable"):
-            dag.prune()
+            dag.prune_unreachable()
 
 
 class TestEdgeIndex:
@@ -669,7 +735,7 @@ class TestEdgeIndex:
         assert diamond.edge_dist[idx] > 0.0
 
     def test_all_edges_round_trip(self, lattice: HorizontalDAG) -> None:
-        pruned = lattice.prune()
+        pruned = lattice.prune_unreachable()
         edges = pruned.edges
         for src, dst in edges:
             idx = pruned.edge_index(src, dst)
