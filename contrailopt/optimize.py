@@ -861,7 +861,11 @@ def _build_dag(
                 f"airport {dest.icao_code} ({dest.longitude}, {dest.latitude})"
             )
     else:
-        dag = HorizontalDAG.from_poisson(*origin.coords, *dest.coords, dtype=FLOAT_DTYPE).prune()
+        dag = HorizontalDAG.from_poisson(
+            *origin.coords,
+            *dest.coords,
+            dtype=FLOAT_DTYPE,
+        ).prune_unreachable()
 
     if avoidance_regions:
         dag = dag.exclude_polygons(avoidance_regions)

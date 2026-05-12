@@ -266,7 +266,7 @@ class HorizontalDAG:
             h_dest=self.h_origin,
         )
 
-    def prune(self) -> Self:
+    def prune_unreachable(self) -> Self:
         """Return a new DAG with only nodes reachable from origin that also reach dest."""
         src = self.edge_src
         fwd = _reachability(self.h_origin, self.n_nodes, self.adj_ptr, self.adj)
@@ -304,6 +304,72 @@ class HorizontalDAG:
             edge_dist=new_edge_dist,
             h_origin=new_idx[self.h_origin].item(),
             h_dest=new_idx[self.h_dest].item(),
+        )
+
+    def prune_edges(self, degree: int) -> Self:
+        """Keep the best ``degree`` outgoing and incoming edges per node.
+
+        Each edge is scored by the sum of its azimuth deviations: how far the
+        edge direction deviates from the azimuth toward the destination (at
+        the tail) plus how far the reverse deviates from the azimuth toward
+        the origin (at the head). An edge is kept if it ranks among the best
+        ``degree`` outgoing edges of its source or among the best ``degree``
+        incoming edges of its destination.
+
+        Parameters
+        ----------
+        degree : int
+            Number of outgoing and incoming edges to keep per node.
+
+        Returns
+        -------
+        Self
+            A new DAG with at most ``degree`` outgoing and incoming edges per node.
+        """
+        # Compute azimuth deviation scores for each edge
+        src = self.edge_src
+        az_to_dest = geo.azimuth(self.lon, self.lat, self.lon[self.h_dest], self.lat[self.h_dest])
+        az_to_origin = geo.azimuth(
+            self.lon, self.lat, self.lon[self.h_origin], self.lat[self.h_origin]
+        )
+        az_edge = geo.azimuth(self.lon[src], self.lat[src], self.lon[self.adj], self.lat[self.adj])
+        az_rev = geo.azimuth(self.lon[self.adj], self.lat[self.adj], self.lon[src], self.lat[src])
+
+        delta_tail = np.abs((az_edge - az_to_dest[src] + 180.0) % 360.0 - 180.0)
+        delta_head = np.abs((az_rev - az_to_origin[self.adj] + 180.0) % 360.0 - 180.0)
+        score = delta_tail + delta_head  # many other variations also work: max, min, p-weighted
+
+        # Rank each edge among its source node's outgoing edges by score
+        out_order = np.lexsort((score, src))
+        out_rank = np.empty(self.n_edges, dtype=np.int64)
+        out_rank[out_order] = np.arange(self.n_edges) - self.adj_ptr[src[out_order]]
+
+        # Rank each edge among its dest node's incoming edges by score
+        dst = self.adj
+        rev_ptr, _ = _reverse_csr(dst, self.n_nodes)
+        in_order = np.lexsort((score, dst))
+        in_rank = np.empty(self.n_edges, dtype=np.int64)
+        in_rank[in_order] = np.arange(self.n_edges) - rev_ptr[dst[in_order]]
+
+        keep = (out_rank < degree) | (in_rank < degree)
+
+        # Construct new CSR to return
+        kept_src = src[keep]
+        kept_dst = self.adj[keep]
+        kept_dist = self.edge_dist[keep]
+
+        adj_ptr = np.zeros(self.n_nodes + 1, dtype=np.int64)
+        np.add.at(adj_ptr[1:], kept_src, 1)
+        np.cumsum(adj_ptr, out=adj_ptr)
+
+        return type(self)(
+            lon=self.lon,
+            lat=self.lat,
+            adj_ptr=adj_ptr,
+            adj=kept_dst,
+            edge_dist=kept_dist,
+            h_origin=self.h_origin,
+            h_dest=self.h_dest,
         )
 
     def exclude_polygons(self, polygons: list[list[tuple[float, float]]]) -> Self:
@@ -358,7 +424,7 @@ class HorizontalDAG:
             edge_dist=kept_dist,
             h_origin=self.h_origin,
             h_dest=self.h_dest,
-        ).prune()
+        ).prune_unreachable()
 
     def sample_edges(
         self, spacing_m: float
@@ -414,7 +480,7 @@ class HorizontalDAG:
         edge_idx = np.repeat(np.arange(self.n_edges), n_samples)
         return sample_lon, sample_lat, edge_idx, edge_ptr
 
-    def plot(self, ax: "GeoAxes | None" = None) -> "GeoAxes":
+    def plot(self, ax: "GeoAxes | None" = None, linewidth: float = 0.1) -> "GeoAxes":
         """Plot the DAG on a cartopy map."""
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
@@ -445,7 +511,13 @@ class HorizontalDAG:
             ],
             axis=1,
         )
-        lc = LineCollection(segments, colors="steelblue", linewidths=0.1, alpha=0.2, transform=pc)
+        lc = LineCollection(
+            segments,
+            colors="steelblue",
+            linewidths=linewidth,
+            alpha=0.2,
+            transform=pc,
+        )
         ax.add_collection(lc)
 
         # Draw nodes
