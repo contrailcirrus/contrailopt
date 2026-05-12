@@ -500,6 +500,7 @@ class HorizontalDAG:
 
         ax.add_feature(cfeature.LAND, facecolor="lightgray")
         ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor="gray")
         ax.add_feature(cfeature.STATES, linewidth=0.2, edgecolor="gray")
 
         # Draw edges
