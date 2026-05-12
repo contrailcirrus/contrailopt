@@ -9,7 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
-from pycontrails import Flight, MetDataset
+from pycontrails import Flight, JetA, MetDataset
 from pycontrails.core import airports
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.physics import geo, jet, units
@@ -580,12 +580,19 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     valid = feasible[:, :, np.newaxis] & cruise_feasible & (cruise_dist[:, :, np.newaxis] > 0.0)
     cruise_cost = ctx.cost_index / 60.0 * cruise_time + cruise_fuel
     descent_cost = ctx.cost_index / 60.0 * descent_dt + descent_df
+
+    # CO2 climate cost of fuel burn (kg-fuel-equivalent)
+    fuel_co2_cost = (
+        JetA.ei_co2 * _J_PER_KG_CO2 * ctx.eef_cost_factor
+        * (climb_fuel[:, :, np.newaxis] + cruise_fuel + descent_df[:, :, np.newaxis])
+    )
     total_cost = (
         src_costs[src_idx, np.newaxis, np.newaxis]
         + climb_cost[:, :, np.newaxis]
         + descent_cost[:, :, np.newaxis]
         + cruise_cost
         + (ctx.eef_cost_factor * cruise_eef)[:, :, np.newaxis]
+        + fuel_co2_cost
     )
     total_cost = np.where(valid, total_cost, np.inf)
 
