@@ -318,6 +318,7 @@ class _SolverCtx:
     atyp: ps_aircraft_params.PSAircraftEngineParams
     cost_index: float  # kg fuel / minute of flight time
     eef_cost_factor: float  # kg fuel / EEF Joule
+    allow_cooling_credit: bool
     origin_elev_ft: float
     dest_elev_ft: float
     takeoff_time: pd.Timestamp
@@ -583,15 +584,24 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
 
     # CO2 climate cost of fuel burn (kg-fuel-equivalent)
     fuel_co2_cost = (
-        JetA.ei_co2 * _J_PER_KG_CO2 * ctx.eef_cost_factor
+        JetA.ei_co2
+        * _J_PER_KG_CO2
+        * ctx.eef_cost_factor
         * (climb_fuel[:, :, np.newaxis] + cruise_fuel + descent_df[:, :, np.newaxis])
     )
+    # CO2e climate cost of contrail EEF (kg-fuel-equivalent)
+    contrail_co2e_cost = (
+        ctx.eef_cost_factor
+        * (cruise_eef if ctx.allow_cooling_credit else np.maximum(cruise_eef, 0.0))
+    )[:, :, np.newaxis]
+
+    # The main cost function
     total_cost = (
         src_costs[src_idx, np.newaxis, np.newaxis]
         + climb_cost[:, :, np.newaxis]
         + descent_cost[:, :, np.newaxis]
         + cruise_cost
-        + (ctx.eef_cost_factor * cruise_eef)[:, :, np.newaxis]
+        + contrail_co2e_cost
         + fuel_co2_cost
     )
     total_cost = np.where(valid, total_cost, np.inf)
@@ -642,6 +652,7 @@ def solve_dag(
     dest_elev_ft: float,
     takeoff_time: pd.Timestamp,
     met_lookup: EdgeMetLookup | None = None,
+    allow_cooling_credit: bool = False,
     on_wavefront: Callable[[npt.NDArray[np.int64], DAGState], None] | None = None,
 ) -> DAGState:
     """Solve shortest-path DP on the topo-sorted DAG, tracking mass exactly."""
@@ -657,6 +668,7 @@ def solve_dag(
         atyp=atyp,
         cost_index=cost_index,
         eef_cost_factor=eef_cost_factor,
+        allow_cooling_credit=allow_cooling_credit,
         origin_elev_ft=origin_elev_ft,
         dest_elev_ft=dest_elev_ft,
         takeoff_time=takeoff_time,
@@ -921,6 +933,10 @@ class Optimizer:
         the aircraft type. Providing an explicit value decouples the met lookup from the
         aircraft, allowing the user to call the ``solve()`` method with a different aircraft
         type without re-initializing the optimizer.
+    allow_cooling_credit : bool, default False
+        If True, negative EEF (cooling contrails) reduces cost when ``dollar_tonne_co2e`` is set.
+        If False, negative EEF is clipped to zero in the cost function but still reported
+        in the output flight. Only used if ``dollar_tonne_co2e`` is set.
     avoidance_regions : list of polygon coordinate lists, or None
         Polygons to exclude from the search, defined as lists of ``(lon, lat)`` vertices.
         Edges intersecting any polygon are removed and the DAG is re-pruned.
@@ -940,6 +956,7 @@ class Optimizer:
         dollar_kg_fuel: float = 1.0,
         met_spacing_m: float = 20_000.0,
         flight_hours: int | None = None,
+        allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
     ) -> None:
         self.origin = (
@@ -953,6 +970,7 @@ class Optimizer:
         self.cost_index = cost_index
         self.dollar_tonne_co2e = dollar_tonne_co2e
         self.dollar_kg_fuel = dollar_kg_fuel
+        self.allow_cooling_credit = allow_cooling_credit
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
 
@@ -999,6 +1017,7 @@ class Optimizer:
         dollar_kg_fuel: float = 1.0,
         met_spacing_m: float = 20_000.0,
         max_dist_m: float = 500_000.0,
+        allow_cooling_credit: bool = False,
     ) -> Self:
         """Build a vertical-only optimizer from a ``pycontrails.Flight`` trajectory."""
         if not flight:
@@ -1044,6 +1063,7 @@ class Optimizer:
             dollar_tonne_co2e=dollar_tonne_co2e,
             dollar_kg_fuel=dollar_kg_fuel,
             met_spacing_m=met_spacing_m,
+            allow_cooling_credit=allow_cooling_credit,
         )
 
     @property
@@ -1137,6 +1157,7 @@ class Optimizer:
                 dest_elev_ft=self.dest.elevation_ft,
                 takeoff_time=self.takeoff_time,
                 met_lookup=self.met_lookup,
+                allow_cooling_credit=self.allow_cooling_credit,
             )
             ground_fi = len(self.fl_choices)
             amass_final = state.best_mass[self.dag.h_dest, ground_fi].item()
