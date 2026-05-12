@@ -1088,6 +1088,7 @@ class Optimizer:
         dollar_tonne_co2e: float | None = None,
         aircraft_type: str | None = None,
         payload: float | None = None,
+        allow_cooling_credit: bool | None = None,
     ) -> DAGResult:
         """Solve the trajectory optimization via shortest-path dynamic programming on the DAG.
 
@@ -1116,6 +1117,8 @@ class Optimizer:
             to accommodate the new aircraft's speed.
         payload : float or None, default None
             Aircraft payload in kg if known. If None, this is estimated with pycontrails.
+        allow_cooling_credit : bool or None, default None
+            If provided, updates ``self.allow_cooling_credit`` before solving.
 
         Returns
         -------
@@ -1126,6 +1129,8 @@ class Optimizer:
             self.cost_index = cost_index
         if dollar_tonne_co2e is not None:
             self.dollar_tonne_co2e = dollar_tonne_co2e
+        if allow_cooling_credit is not None:
+            self.allow_cooling_credit = allow_cooling_credit
         if aircraft_type is not None:
             self.aircraft_type = aircraft_type
             self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
