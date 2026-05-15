@@ -157,6 +157,32 @@ class TestPruneEdges:
 
 
 class TestTopoWavefronts:
+    def test_unpruned_with_unreachable_predecessor(self) -> None:
+        """Graph: 0->1->3, 2->1. 2 is unreachable from 0, so it's not included in the wavefronts."""
+        lon = np.zeros(4)  # meaningless
+        lat = np.zeros(4)  # meaningless
+        edge_dist = np.zeros(3)  # meaningless
+
+        adj_ptr = np.array([0, 1, 2, 3, 3])  # out-degrees: [1, 1, 1, 0]
+        adj = np.array([1, 3, 1])  # 0->1, 1->3, 2->1
+
+        dag = HorizontalDAG(
+            lon=lon,
+            lat=lat,
+            adj_ptr=adj_ptr,
+            adj=adj,
+            edge_dist=edge_dist,
+            h_origin=0,
+            h_dest=3,
+        )
+
+        waves = dag.topo_wavefronts()
+        assert next(waves) == [0]
+        assert next(waves) == [1]
+        assert next(waves) == [3]
+        with pytest.raises(StopIteration):
+            next(waves)  # exhausted
+
     def test_diamond_two_wavefronts(self, diamond: HorizontalDAG) -> None:
         waves = list(diamond.topo_wavefronts())
         assert len(waves) == 3

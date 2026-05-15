@@ -694,16 +694,21 @@ class HorizontalDAG:
         )
 
     def topo_wavefronts(self) -> Generator[npt.NDArray[np.int64], None, None]:
-        """Return topological wavefronts reachable from origin.
+        """Yield topological wavefronts reachable from origin.
 
-        The first wavefront contains only the origin.
+        Only nodes reachable from ``h_origin`` are emitted. Unreachable nodes
+        (those with incoming edges from outside the reachable subgraph) are
+        excluded.
 
-        Wavefront k contains nodes whose remaining in-degree is zero after removing
-        wavefronts 0..k-1. Therefore edges and paths only go from earlier wavefronts
-        to later wavefronts, so no later wavefront can reach an earlier one.
+        The first wavefront contains only the origin. Wavefront *k* contains
+        nodes whose reachable in-degree drops to zero after removing wavefronts
+        0 ... k-1.
         """
+        reachable = _reachability(self.h_origin, self.n_nodes, self.adj_ptr, self.adj)
+        live_edges = reachable[self.edge_src]
+
         in_degree = np.zeros(self.n_nodes, dtype=np.int64)
-        np.add.at(in_degree, self.adj, 1)
+        np.add.at(in_degree, self.adj[live_edges], 1)
 
         wave_nodes = np.array([self.h_origin])
         while wave_nodes.size:
