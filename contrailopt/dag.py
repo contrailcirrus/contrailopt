@@ -579,7 +579,7 @@ class HorizontalDAG:
         origin_lat: float,
         dest_lon: float,
         dest_lat: float,
-        poisson_radius: float = 0.025,
+        poisson_spacing_m: float = 50_000.0,
         max_cross_track: float | None = None,
         max_angle_deg: float = 40.0,
         max_dist_m: float = 500_000.0,
@@ -606,11 +606,18 @@ class HorizontalDAG:
         az_perp[:-1] = az_fwd + 90.0
         az_perp[-1] = az_perp[-2]
 
-        # Poisson disk sampling in [0, 1]^2
-        poisson_disk = PoissonDisk(d=2, radius=poisson_radius)
+        # Poisson disk sampling with physically uniform spacing.
+        # The corridor is gs_distance x 2*max_cross_track in physical space.
+        # We sample in [0, aspect] x [0, 1] so the radius is isotropic in
+        # physical units, then normalize the along-track coordinate.
+        corridor_width = 2.0 * max_cross_track
+        aspect = gs_distance / corridor_width
+        unit_radius = poisson_spacing_m / corridor_width
+
+        poisson_disk = PoissonDisk(d=2, radius=unit_radius, l_bounds=[0, 0], u_bounds=[aspect, 1])
         pts = poisson_disk.fill_space()
-        t = pts[:, 0]
-        cross = pts[:, 1] * 2.0 * max_cross_track - max_cross_track
+        t = pts[:, 0] / aspect
+        cross = pts[:, 1] * corridor_width - max_cross_track
 
         # Prepend origin and append dest
         t = np.concatenate([[0.0], t, [1.0]])
