@@ -512,10 +512,12 @@ class TestEstimateFlightHours:
 class TestEstimateMass:
     def test_explicit_payload(self, atyp: PSParams) -> None:
         """Explicit payload is passed through unchanged."""
+        origin = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13)
+        dest = AirportCoords(icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128)
         payload, reserve_fuel = _estimate_mass(
             payload=15_000.0,
-            origin_icao="KJFK",
-            dest_icao="KLAX",
+            origin=origin,
+            dest=dest,
             takeoff_time=pd.Timestamp("2024-06-01"),
             aircraft_type="A320",
             atyp=atyp,
@@ -525,10 +527,12 @@ class TestEstimateMass:
 
     def test_estimated_payload(self, atyp: PSParams) -> None:
         """Estimated payload from pycontrails is positive."""
+        origin = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13)
+        dest = AirportCoords(icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128)
         payload, reserve_fuel = _estimate_mass(
             payload=None,
-            origin_icao="KJFK",
-            dest_icao="KLAX",
+            origin=origin,
+            dest=dest,
             takeoff_time=pd.Timestamp("2024-06-01"),
             aircraft_type="A320",
             atyp=atyp,
