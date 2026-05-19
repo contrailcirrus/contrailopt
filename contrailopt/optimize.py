@@ -767,8 +767,8 @@ def _estimate_trip_fuel(
 
 def _estimate_mass(
     payload: float | None,
-    origin_icao: str,
-    dest_icao: str,
+    origin: AirportCoords,
+    dest: AirportCoords,
     takeoff_time: pd.Timestamp,
     aircraft_type: str,
     atyp: ps_aircraft_params.PSAircraftEngineParams,
@@ -779,9 +779,12 @@ def _estimate_mass(
     following the approach in ``pycontrails.models.ps_model.ps_grid``.
     """
     if payload is None:
-        pax_lf = jet.passenger_load_factor(origin_icao, takeoff_time)
+        pax_lf = jet.passenger_load_factor(origin.icao_code, takeoff_time)
         n_seats = jet.number_of_seats(aircraft_type)
-        cargo_lf = jet.cargo_load_factor(origin_icao, dest_icao)
+        dist_km = geo.haversine(*origin.coords, *dest.coords).item() / 1000.0
+        cargo_lf = jet.cargo_load_factor(
+            origin.icao_code, dest.icao_code, total_flight_dist=dist_km
+        )
         payload = jet.aircraft_payload(
             max_payload=atyp.amass_mpl,
             n_seats=n_seats,
@@ -1138,8 +1141,8 @@ class Optimizer:
 
         payload, reserve_fuel = _estimate_mass(
             payload,
-            self.origin.icao_code,
-            self.dest.icao_code,
+            self.origin,
+            self.dest,
             self.takeoff_time,
             self.aircraft_type,
             self.atyp,
