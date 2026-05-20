@@ -560,11 +560,10 @@ class TestCruiseFlightLevels:
 class TestBuildDag:
     def test_generates_dag_when_none(self) -> None:
         """Passing dag=None generates a new Poisson DAG."""
-        origin = AirportCoords(
-            icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13.0
-        )
-        dest = AirportCoords(icao_code="KBOS", longitude=-71.01, latitude=42.36, elevation_ft=20.0)
+        origin = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13)
+        dest = AirportCoords(icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128)
         dag = _build_dag(origin, dest, dag=None, avoidance_regions=None)
+
         assert dag.n_nodes > 2
         assert dag.n_edges > 0
 

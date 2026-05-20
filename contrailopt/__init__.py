@@ -3,6 +3,7 @@
 from importlib import metadata
 
 from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
+from contrailopt.metrics import flight_metrics
 from contrailopt.optimize import (
     DAGResult,
     DAGState,
@@ -23,5 +24,6 @@ __all__ = [
     "Optimizer",
     "cruise_flight_levels",
     "estimate_flight_hours",
+    "flight_metrics",
     "load_faa_waypoints",
 ]
