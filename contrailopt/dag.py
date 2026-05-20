@@ -905,9 +905,12 @@ class EdgeMetLookup:
         ds = ds[variables]
 
         # Downselect met in time
+        # We're assuming that met has hourly spacing, which could be relaxed
         if takeoff_time.tzinfo:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
-        times = pd.date_range(takeoff_time, periods=flight_hours + 1, freq="h")
+        t0 = takeoff_time.floor("1h")
+        extra = t0 < takeoff_time
+        times = pd.date_range(t0, periods=flight_hours + extra + 1, freq="h")
         available = pd.DatetimeIndex(ds["time"])
         usable = times[times.isin(available)]
 
