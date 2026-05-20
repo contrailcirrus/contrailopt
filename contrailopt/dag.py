@@ -579,7 +579,7 @@ class HorizontalDAG:
         origin_lat: float,
         dest_lon: float,
         dest_lat: float,
-        poisson_spacing_m: float = 50_000.0,
+        poisson_spacing_m: float = 80_000.0,
         max_cross_track: float | None = None,
         max_angle_deg: float = 40.0,
         max_dist_m: float = 500_000.0,

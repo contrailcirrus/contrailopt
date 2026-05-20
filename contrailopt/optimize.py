@@ -883,11 +883,16 @@ def _build_dag(
                 f"airport {dest.icao_code} ({dest.longitude}, {dest.latitude})"
             )
     else:
-        dag = HorizontalDAG.from_poisson(
-            *origin.coords,
-            *dest.coords,
-            dtype=FLOAT_DTYPE,
-        ).prune_unreachable()
+        dag = (
+            HorizontalDAG.from_poisson(
+                *origin.coords,
+                *dest.coords,
+                dtype=FLOAT_DTYPE,
+                # could expose poisson_spacing_m, but user can also pass a custom dag directly
+            )
+            .prune_edges(degree=8)  # could expose, but user can also pass a custom dag directly
+            .prune_unreachable()
+        )
 
     if avoidance_regions:
         dag = dag.exclude_polygons(avoidance_regions)
@@ -918,7 +923,6 @@ class Optimizer:
     dag : HorizontalDAG or None, default None
         Pre-built DAG. If *None*, a DAG is generated via Poisson-disk sampling along the
         great circle. The DAG origin and destination must agree with the airport coordinates.
-        The DAG is expected to be pruned (``HorizontalDAG.prune()``) but this is not enforced.
     cost_index : float, default 60.0
         Fuel-vs-time tradeoff in kg per minute. Higher values penalize time more,
         favoring faster (and more fuel-intensive) routes.
@@ -929,7 +933,7 @@ class Optimizer:
     dollar_kg_fuel : float, default 1.0
         Fuel price in US dollars per kg. Only used to convert the carbon cost into the
         fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
-    met_spacing_m : float, default 20_000.0
+    met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
     flight_hours : int or None, default None
         Upper-bound flight duration in hours for met time window. If None, estimated from
@@ -957,7 +961,7 @@ class Optimizer:
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
-        met_spacing_m: float = 20_000.0,
+        met_spacing_m: float = 25_000.0,
         flight_hours: int | None = None,
         allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
