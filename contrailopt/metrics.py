@@ -6,76 +6,72 @@ from pycontrails import Flight
 from pycontrails.physics import constants
 
 
-def flight_metrics(fl_a: Flight, fl_b: Flight) -> dict[str, float]:
-    """Compute similarity metrics between two flights.
+def flight_metrics(fl_cand: Flight, fl_base: Flight) -> dict[str, float]:
+    """Compute similarity metrics between a candidate and baseline flight.
 
     Parameters
     ----------
-    fl_a : Flight
-        First flight.
-    fl_b : Flight
-        Second flight (used as the reference for percentage differences).
+    fl_cand : Flight
+        Candidate flight.
+    fl_base : Flight
+        Baseline flight.
 
     Returns
     -------
     dict[str, float]
         Dictionary with keys:
-        - dist_a_m: total distance of fl_a in meters
-        - dist_b_m: total distance of fl_b in meters
-        - dist_diff_pct: percent difference (fl_a - fl_b) / fl_b
-        - time_a_s: total duration of fl_a in seconds
-        - time_b_s: total duration of fl_b in seconds
-        - time_diff_s: duration difference in seconds
+        - dist_cand_m: total distance of fl_cand in meters
+        - dist_base_m: total distance of fl_base in meters
+        - time_cand_s: total duration of fl_cand in seconds
+        - time_base_s: total duration of fl_base in seconds
         - lateral_dev_m: symmetric mean lateral deviation in meters
         - altitude_dev_ft: symmetric mean altitude deviation in feet
     """
-    dist_a = fl_a.segment_length()[:-1].sum().item()
-    dist_b = fl_b.segment_length()[:-1].sum().item()
+    dist_cand = fl_cand.segment_length()[:-1].sum().item()
+    dist_base = fl_base.segment_length()[:-1].sum().item()
 
-    time_a = fl_a.duration.total_seconds()
-    time_b = fl_b.duration.total_seconds()
+    time_cand = fl_cand.duration.total_seconds()
+    time_base = fl_base.duration.total_seconds()
 
-    lat_dev = _mean_lateral_deviation(fl_a, fl_b)
-    alt_dev = _mean_altitude_deviation(fl_a, fl_b)
+    lat_dev = _mean_lateral_deviation(fl_cand, fl_base)
+    alt_dev = _mean_altitude_deviation(fl_cand, fl_base)
 
     return {
-        "dist_a_m": dist_a,
-        "dist_b_m": dist_b,
-        "dist_diff_pct": (dist_a - dist_b) / dist_b * 100.0,
-        "time_a_s": time_a,
-        "time_b_s": time_b,
-        "time_diff_s": time_a - time_b,
+        "dist_cand_m": dist_cand,
+        "dist_base_m": dist_base,
+        "time_cand_s": time_cand,
+        "time_base_s": time_base,
         "lateral_dev_m": lat_dev,
         "altitude_dev_ft": alt_dev,
     }
 
 
-def _mean_lateral_deviation(fl_a: Flight, fl_b: Flight) -> float:
+def _mean_lateral_deviation(fl_cand: Flight, fl_base: Flight) -> float:
     """Compute symmetric mean point-to-linestring distance between two flights (meters)."""
-    a_to_b = (
+    cand_to_base = (
         _point_to_linestring_dist(
-            fl_a["longitude"],
-            fl_a["latitude"],
-            fl_b["longitude"],
-            fl_b["latitude"],
+            fl_cand["longitude"],
+            fl_cand["latitude"],
+            fl_base["longitude"],
+            fl_base["latitude"],
         )
         .mean()
         .item()
     )
-    b_to_a = (
+    base_to_cand = (
         _point_to_linestring_dist(
-            fl_b["longitude"],
-            fl_b["latitude"],
-            fl_a["longitude"],
-            fl_a["latitude"],
+            fl_base["longitude"],
+            fl_base["latitude"],
+            fl_cand["longitude"],
+            fl_cand["latitude"],
         )
         .mean()
         .item()
     )
-    return (a_to_b + b_to_a) / 2.0
+    return (cand_to_base + base_to_cand) / 2.0
 
 
-def _mean_altitude_deviation(fl_a: Flight, fl_b: Flight) -> float:
+def _mean_altitude_deviation(fl_cand: Flight, fl_base: Flight) -> float:
     """Symmetric mean absolute altitude difference between two flights (feet)."""
 
     def _cum_dist_frac(f: Flight) -> np.ndarray:
@@ -87,16 +83,16 @@ def _mean_altitude_deviation(fl_a: Flight, fl_b: Flight) -> float:
             return cd
         return cd / total
 
-    frac_a = _cum_dist_frac(fl_a)
-    frac_b = _cum_dist_frac(fl_b)
+    frac_cand = _cum_dist_frac(fl_cand)
+    frac_base = _cum_dist_frac(fl_base)
 
-    alt_b_interp = np.interp(frac_a, frac_b, fl_b.altitude_ft)
-    a_to_b = np.abs(fl_a.altitude_ft - alt_b_interp).mean().item()
+    alt_base_interp = np.interp(frac_cand, frac_base, fl_base.altitude_ft)
+    cand_to_base = np.abs(fl_cand.altitude_ft - alt_base_interp).mean().item()
 
-    alt_a_interp = np.interp(frac_b, frac_a, fl_a.altitude_ft)
-    b_to_a = np.abs(fl_b.altitude_ft - alt_a_interp).mean().item()
+    alt_cand_interp = np.interp(frac_base, frac_cand, fl_cand.altitude_ft)
+    base_to_cand = np.abs(fl_base.altitude_ft - alt_cand_interp).mean().item()
 
-    return (a_to_b + b_to_a) / 2.0
+    return (cand_to_base + base_to_cand) / 2.0
 
 
 def _to_xyz(

@@ -53,8 +53,8 @@ def fl_shifted() -> Flight:
 class TestFlightMetrics:
     def test_identical_flights(self, fl_gc: Flight) -> None:
         result = flight_metrics(fl_gc, fl_gc)
-        assert result["dist_diff_pct"] == 0.0
-        assert result["time_diff_s"] == 0.0
+        assert result["dist_cand_m"] == result["dist_base_m"]
+        assert result["time_cand_s"] == result["time_base_s"]
         assert result["lateral_dev_m"] == pytest.approx(0.0, abs=1.0)
         assert result["altitude_dev_ft"] == pytest.approx(0.0, abs=0.01)
 
@@ -73,17 +73,15 @@ class TestFlightMetrics:
         lats_detour = np.r_[lats[:5], 50.0, lats[5:]]
         fl_long = _make_flight(lons_detour, lats_detour)
         result = flight_metrics(fl_long, fl_gc)
-        assert result["dist_diff_pct"] > 10.0  # detour is longer
+        assert result["dist_cand_m"] > result["dist_base_m"] * 1.1  # detour is longer
 
     def test_output_keys(self, fl_gc: Flight, fl_shifted: Flight) -> None:
         result = flight_metrics(fl_gc, fl_shifted)
         expected_keys = {
-            "dist_a_m",
-            "dist_b_m",
-            "dist_diff_pct",
-            "time_a_s",
-            "time_b_s",
-            "time_diff_s",
+            "dist_cand_m",
+            "dist_base_m",
+            "time_cand_s",
+            "time_base_s",
             "lateral_dev_m",
             "altitude_dev_ft",
         }
