@@ -10,6 +10,7 @@ from contrailopt.optimize import (
     Optimizer,
     cruise_flight_levels,
     estimate_flight_hours,
+    solve_dag,
 )
 from contrailopt.waypoints import load_faa_waypoints
 
@@ -26,4 +27,5 @@ __all__ = [
     "estimate_flight_hours",
     "flight_metrics",
     "load_faa_waypoints",
+    "solve_dag",
 ]
