@@ -882,7 +882,9 @@ class EdgeMetLookup:
         ----------
         met : MetDataset | xr.Dataset
             Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind".
-            If "eef_per_m" is present, it will also be included in the output.
+            If "eef_per_m" is present, it will also be included in the output with
+            NaN values filled to 0.0 (no EEF forecast is treated as zero forcing).
+            NaN values in weather variables are not allowed and will raise an error.
             Either a pycontrails ``MetDataset`` or a raw ``xr.Dataset`` with similar
             structure can be passed.
         dag : HorizontalDAG
@@ -974,6 +976,15 @@ class EdgeMetLookup:
         # Calling ds.interp chews up too much memory and the pycontrails RGI isn't
         # exactly designed for this, so just call custom numpy-based _bilinear_interp
         ds = _bilinear_interp(ds, sample_lon, sample_lat)
+
+        # Raise on NaN in core weather - downstream computations would be poisoned.
+        for var in ("air_temperature", "eastward_wind", "northward_wind"):
+            if ds[var].isnull().any():
+                raise ValueError(f"NaN values found in '{var}' after interpolation onto samples")
+
+        # NaN-fill eef_per_m with 0.0. If NaNs are kept, downstream computations would be poisoned.
+        if "eef_per_m" in ds:
+            ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
 
         return cls(
             ds=ds,
