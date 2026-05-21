@@ -119,10 +119,11 @@ class HorizontalDAG:
     computed on a sphere, not on a planar lon/lat grid.
     """
 
-    #: Longitude of each node in degrees ``(n,)``.
+    #: Longitude of each node in degrees ``(n,)``. Assumed to be in the range [-180, 180).
+    #: (This assumption is used in :meth:`crosses_antimeridian`).
     lon: npt.NDArray[np.floating]
 
-    #: Latitude of each node in degrees ``(n,)``.
+    #: Latitude of each node in degrees ``(n,)``. Assumed to be in the range [-90, 90].
     lat: npt.NDArray[np.floating]
 
     #: CSR row pointers ``(n + 1,)``.
@@ -183,6 +184,11 @@ class HorizontalDAG:
     def edges(self) -> npt.NDArray[np.int64]:
         """The directed edges of the graph as (src, dest) index pairs in an ``(m, 2)`` array."""
         return np.column_stack([self.edge_src, self.adj])
+
+    @property
+    def crosses_antimeridian(self) -> bool:
+        """Determine if the great circle between origin and destination crosses the antimeridian."""
+        return abs(self.lon[self.h_origin].item() - self.lon[self.h_dest].item()) > 180.0
 
     def neighbors(self, i: int) -> npt.NDArray[np.int64]:
         """Return the neighbors of a specified node."""
@@ -487,16 +493,25 @@ class HorizontalDAG:
         import matplotlib.pyplot as plt
         from matplotlib.collections import LineCollection
 
-        pc = ccrs.PlateCarree()
-
         if ax is None:
-            _, ax = plt.subplots(figsize=(20, 10), subplot_kw={"projection": pc})
+            central_lon = 180.0 if self.crosses_antimeridian else 0.0
+            proj = ccrs.PlateCarree(central_longitude=central_lon)
+            _, ax = plt.subplots(figsize=(20, 10), subplot_kw={"projection": proj})
 
-            lon_min = self.lon.min() - 2.0
-            lon_max = self.lon.max() + 2.0
-            lat_min = self.lat.min() - 2.0
-            lat_max = self.lat.max() + 2.0
-            ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=pc)
+            plot_lon = (self.lon - central_lon + 180.0) % 360.0 - 180.0
+            ax.set_extent(
+                [
+                    plot_lon.min() - 2.0,
+                    plot_lon.max() + 2.0,
+                    self.lat.min() - 2.0,
+                    self.lat.max() + 2.0,
+                ],
+                crs=proj,
+            )
+        else:
+            proj = ax.projection
+            central_lon = proj.proj4_params.get("lon_0", 0.0)
+            plot_lon = (self.lon - central_lon + 180.0) % 360.0 - 180.0
 
         ax.add_feature(cfeature.LAND, facecolor="lightgray")
         ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
@@ -507,8 +522,8 @@ class HorizontalDAG:
         edge_src = self.edge_src
         segments = np.stack(
             [
-                np.column_stack([self.lon[edge_src], self.lat[edge_src]]),
-                np.column_stack([self.lon[self.adj], self.lat[self.adj]]),
+                np.column_stack([plot_lon[edge_src], self.lat[edge_src]]),
+                np.column_stack([plot_lon[self.adj], self.lat[self.adj]]),
             ],
             axis=1,
         )
@@ -517,26 +532,26 @@ class HorizontalDAG:
             colors="steelblue",
             linewidths=linewidth,
             alpha=0.2,
-            transform=pc,
+            transform=proj,
         )
         ax.add_collection(lc)
 
         # Draw nodes
-        ax.scatter(self.lon, self.lat, s=2, color="black", transform=pc, zorder=5)
+        ax.scatter(plot_lon, self.lat, s=2, color="black", transform=proj, zorder=5)
         ax.plot(
-            self.lon[self.h_origin],
+            plot_lon[self.h_origin],
             self.lat[self.h_origin],
             "ro",
             markersize=8,
-            transform=pc,
+            transform=proj,
             zorder=10,
         )
         ax.plot(
-            self.lon[self.h_dest],
+            plot_lon[self.h_dest],
             self.lat[self.h_dest],
             "go",
             markersize=8,
-            transform=pc,
+            transform=proj,
             zorder=10,
         )
 
@@ -623,12 +638,16 @@ class HorizontalDAG:
         t = np.concatenate([[0.0], t, [1.0]])
         cross = np.concatenate([[0.0], cross, [0.0]], dtype=dtype)
 
-        # Project to (lon, lat)
+        # Project to (lon, lat) dealing with potential antimeridian crossing via unwrapping.
         t_gc = np.linspace(0.0, 1.0, nx)
-        lon_base = np.interp(t, t_gc, gc_lons).astype(dtype)
+        gc_lons_unwrap = np.unwrap(gc_lons, period=360.0)
+        az_perp_unwrap = np.unwrap(az_perp, period=360.0)
+        lon_base = np.interp(t, t_gc, gc_lons_unwrap).astype(dtype)
+        lon_base = (lon_base + 180.0) % 360.0 - 180.0
         lat_base = np.interp(t, t_gc, gc_lats).astype(dtype)
-        az_base = np.interp(t, t_gc, az_perp).astype(dtype)
+        az_base = np.interp(t, t_gc, az_perp_unwrap).astype(dtype)
         lon, lat = spherical_fwd(lon_base, lat_base, az_base, cross)
+        lon = (lon + 180.0) % 360.0 - 180.0
 
         return cls.from_points(
             lon,

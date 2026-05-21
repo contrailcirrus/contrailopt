@@ -340,6 +340,25 @@ class TestFromPoisson:
         assert np.all(dag.edge_dist > 0.0)
         assert np.all(dag.edge_dist < 600_000.0)
 
+    def test_antimeridian_crossing(self) -> None:
+        # YBBN (153.1, -27.4) -> CYVR (-123.2, 49.2) crosses the antimeridian.
+        dag = HorizontalDAG.from_poisson(153.1, -27.4, -123.2, 49.2).prune_unreachable()
+        assert dag.crosses_antimeridian
+        assert dag.n_nodes > 10
+        assert dag.n_edges > dag.n_nodes
+
+        # All longitudes should be valid
+        assert np.all(dag.lon >= -180.0)
+        assert np.all(dag.lon <= 180.0)
+
+        # Nodes should exist on both sides of the antimeridian
+        assert np.any(dag.lon > 170.0)
+        assert np.any(dag.lon < -170.0)
+
+    def test_no_antimeridian_domestic(self) -> None:
+        dag = HorizontalDAG.from_poisson(-118.4, 33.9, -73.8, 40.6)
+        assert not dag.crosses_antimeridian
+
 
 class TestAirportCoords:
     def test_from_icao(self) -> None:
