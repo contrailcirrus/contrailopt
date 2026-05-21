@@ -599,6 +599,7 @@ class HorizontalDAG:
         max_angle_deg: float = 40.0,
         max_dist_m: float = 500_000.0,
         dtype: type[np.floating] = np.float64,
+        rng: np.random.Generator | None = None,
     ) -> Self:
         """Build a DAG from Poisson-disk sampled points along the OD great circle."""
         from scipy.stats.qmc import PoissonDisk
@@ -629,7 +630,13 @@ class HorizontalDAG:
         aspect = gs_distance / corridor_width
         unit_radius = poisson_spacing_m / corridor_width
 
-        poisson_disk = PoissonDisk(d=2, radius=unit_radius, l_bounds=[0, 0], u_bounds=[aspect, 1])
+        poisson_disk = PoissonDisk(
+            d=2,
+            radius=unit_radius,
+            l_bounds=[0, 0],
+            u_bounds=[aspect, 1],
+            rng=rng,
+        )
         pts = poisson_disk.fill_space()
         t = pts[:, 0] / aspect
         cross = pts[:, 1] * corridor_width - max_cross_track

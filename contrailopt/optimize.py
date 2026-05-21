@@ -3,7 +3,7 @@
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import numpy.typing as npt
@@ -854,6 +854,7 @@ def _build_dag(
     dest: AirportCoords,
     dag: HorizontalDAG | None,
     avoidance_regions: list[list[tuple[float, float]]] | None,
+    **kwargs: Any,
 ) -> HorizontalDAG:
     """Validate or build a DAG, then apply avoidance regions."""
     if dag is not None:
@@ -888,7 +889,7 @@ def _build_dag(
                 *origin.coords,
                 *dest.coords,
                 dtype=FLOAT_DTYPE,
-                # could expose poisson_spacing_m, but user can also pass a custom dag directly
+                **kwargs,
             )
             .prune_edges(degree=8)  # could expose, but user can also pass a custom dag directly
             .prune_unreachable()
@@ -947,6 +948,9 @@ class Optimizer:
     avoidance_regions : list of polygon coordinate lists, or None
         Polygons to exclude from the search, defined as lists of ``(lon, lat)`` vertices.
         Edges intersecting any polygon are removed and the DAG is re-pruned.
+    **kwargs
+        Additional parameters for DAG generation if ``dag`` is None. Passed into
+        ``HorizontalDAG.from_poisson``.
     """
 
     def __init__(
@@ -965,6 +969,7 @@ class Optimizer:
         flight_hours: int | None = None,
         allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
+        **kwargs: Any,
     ) -> None:
         self.origin = (
             AirportCoords.from_icao(origin_icao) if isinstance(origin_icao, str) else origin_icao
@@ -987,7 +992,7 @@ class Optimizer:
             if "eef_per_m" not in met:
                 raise ValueError("met must contain 'eef_per_m' when dollar_tonne_co2e is set")
 
-        self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions)
+        self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions, **kwargs)
         self.avoidance_regions = avoidance_regions
 
         self.fl_choices = cruise_flight_levels(origin_icao, dest_icao)
