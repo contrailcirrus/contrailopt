@@ -651,8 +651,8 @@ def solve_dag(
     origin_elev_ft: float,
     dest_elev_ft: float,
     takeoff_time: pd.Timestamp,
-    met_lookup: EdgeMetLookup | None = None,
-    allow_cooling_credit: bool = False,
+    met_lookup: EdgeMetLookup | None,
+    allow_cooling_credit: bool,
     on_wavefront: Callable[[npt.NDArray[np.int64], DAGState], None] | None = None,
 ) -> DAGState:
     """Solve shortest-path DP on the topo-sorted DAG, tracking mass exactly."""
