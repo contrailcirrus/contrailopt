@@ -486,7 +486,7 @@ class HorizontalDAG:
         edge_idx = np.repeat(np.arange(self.n_edges), n_samples)
         return sample_lon, sample_lat, edge_idx, edge_ptr
 
-    def plot(self, ax: "GeoAxes | None" = None, linewidth: float = 0.1) -> "GeoAxes":
+    def plot(self, ax: "GeoAxes | None" = None, linewidth: float = 2.0) -> "GeoAxes":
         """Plot the DAG on a cartopy map."""
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
