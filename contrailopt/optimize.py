@@ -979,9 +979,9 @@ class Optimizer:
         if takeoff_time.tzinfo:
             takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
         self.takeoff_time = takeoff_time
-        self.cost_index = cost_index
-        self.dollar_tonne_co2e = dollar_tonne_co2e
-        self.dollar_kg_fuel = dollar_kg_fuel
+        self.cost_index = float(cost_index)
+        self.dollar_tonne_co2e = float(dollar_tonne_co2e)
+        self.dollar_kg_fuel = float(dollar_kg_fuel)
         self.allow_cooling_credit = allow_cooling_credit
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
@@ -1138,9 +1138,9 @@ class Optimizer:
             DP state, takeoff mass, trip fuel, payload, reserve fuel, and landing mass.
         """
         if cost_index is not None:
-            self.cost_index = cost_index
+            self.cost_index = float(cost_index)
         if dollar_tonne_co2e is not None:
-            self.dollar_tonne_co2e = dollar_tonne_co2e
+            self.dollar_tonne_co2e = float(dollar_tonne_co2e)
         if allow_cooling_credit is not None:
             self.allow_cooling_credit = allow_cooling_credit
         if aircraft_type is not None:
@@ -1498,7 +1498,7 @@ class Optimizer:
             raise ValueError("No met data available; pass met to Optimizer to use plot_met")
 
         if ax is None:
-            ax = self.dag.plot()
+            ax = self.dag.plot(show_edges=False)
 
         ds = self.met_lookup.ds
 
@@ -1551,9 +1551,9 @@ class Optimizer:
             cax = fig.add_axes([pos.x0 + 0.02, pos.y0 + 0.04, pos.width * 0.3, 0.015])
             fig.colorbar(tcf, cax=cax, orientation="horizontal", label="EEF (J/m)")
 
-        fl = int(sel["altitude_ft"].item())
+        fl = round(sel["altitude_ft"].item() / 100)
         t = pd.Timestamp(sel["time"].item())
-        ax.set_title(f"FL{fl // 100} — {t:%Y-%m-%d %H:%M UTC}")
+        ax.set_title(f"FL{fl} — {t:%Y-%m-%d %H:%M UTC}")
         return ax
 
     def animate_solve(self, display_fl_idx: int | None = None) -> "FuncAnimation":

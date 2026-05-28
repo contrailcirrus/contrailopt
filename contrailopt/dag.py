@@ -486,7 +486,12 @@ class HorizontalDAG:
         edge_idx = np.repeat(np.arange(self.n_edges), n_samples)
         return sample_lon, sample_lat, edge_idx, edge_ptr
 
-    def plot(self, ax: "GeoAxes | None" = None, linewidth: float = 2.0) -> "GeoAxes":
+    def plot(
+        self,
+        ax: "GeoAxes | None" = None,
+        linewidth: float = 2.0,
+        show_edges: bool = True,
+    ) -> "GeoAxes":
         """Plot the DAG on a cartopy map."""
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
@@ -513,28 +518,29 @@ class HorizontalDAG:
             central_lon = proj.proj4_params.get("lon_0", 0.0)
             plot_lon = (self.lon - central_lon + 180.0) % 360.0 - 180.0
 
-        ax.add_feature(cfeature.LAND, facecolor="lightgray")
+        ax.add_feature(cfeature.LAND, facecolor="whitesmoke")
         ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
         ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor="gray")
         ax.add_feature(cfeature.STATES, linewidth=0.2, edgecolor="gray")
 
         # Draw edges
-        edge_src = self.edge_src
-        segments = np.stack(
-            [
-                np.column_stack([plot_lon[edge_src], self.lat[edge_src]]),
-                np.column_stack([plot_lon[self.adj], self.lat[self.adj]]),
-            ],
-            axis=1,
-        )
-        lc = LineCollection(
-            segments,
-            colors="steelblue",
-            linewidths=linewidth,
-            alpha=0.2,
-            transform=proj,
-        )
-        ax.add_collection(lc)
+        if show_edges:
+            edge_src = self.edge_src
+            segments = np.stack(
+                [
+                    np.column_stack([plot_lon[edge_src], self.lat[edge_src]]),
+                    np.column_stack([plot_lon[self.adj], self.lat[self.adj]]),
+                ],
+                axis=1,
+            )
+            lc = LineCollection(
+                segments,
+                colors="steelblue",
+                linewidths=linewidth,
+                alpha=0.2,
+                transform=proj,
+            )
+            ax.add_collection(lc)
 
         # Draw nodes
         ax.scatter(plot_lon, self.lat, s=2, color="black", transform=proj, zorder=5)
