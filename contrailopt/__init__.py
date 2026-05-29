@@ -2,6 +2,7 @@
 
 from importlib import metadata
 
+from contrailopt import slerp
 from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
 from contrailopt.metrics import flight_metrics
 from contrailopt.optimize import (
@@ -27,5 +28,6 @@ __all__ = [
     "estimate_flight_hours",
     "flight_metrics",
     "load_faa_waypoints",
+    "slerp",
     "solve_dag",
 ]
