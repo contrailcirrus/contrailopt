@@ -1377,6 +1377,12 @@ class Optimizer:
         out["altitude_ft"] = alt
         out["elapsed_s"] = elapsed
         out["mach_number"] = edge_mach
+        if is_first and np.any(in_climb):
+            out["mach_number"][in_climb] = ps.mach_schedule(alt[in_climb], self.atyp)
+        elif not is_first and np.any(in_climb):
+            out["mach_number"][in_climb] = self.atyp.m_des
+        if is_last and np.any(in_descent):
+            out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
         out["eef_per_m"] = eef_per_m
         out["air_temperature"] = interp.air_temperature[:, 0]
         out["eastward_wind"] = interp.eastward_wind[:, 0]

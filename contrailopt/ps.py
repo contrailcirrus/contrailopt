@@ -12,6 +12,29 @@ ROCD_CLIMB_THRESHOLD = 300.0
 MAX_THRUST_BUFFER = 0.0
 
 
+def mach_schedule(
+    alt_ft: npt.NDArray[np.floating],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+) -> npt.NDArray[np.floating]:
+    """Compute the speed-limited Mach number as a function of altitude.
+
+    Returns ``min(m_des, mach_limit)`` at each altitude, applying ATM speed limits
+    below 10,000 ft. This is the single source of truth for the climb/descent speed
+    schedule used throughout the optimizer.
+    """
+    air_pressure = units.ft_to_pl(alt_ft) * 100.0
+    mach_lim = ps_operational_limits.max_mach_number_by_altitude(
+        alt_ft,
+        air_pressure,
+        atyp.max_mach_num,
+        np.float32(atyp.p_i_max),
+        atyp.p_inf_co,
+        atm_speed_limit=True,
+        buffer=0.0,
+    )
+    return np.minimum(atyp.m_des, mach_lim)
+
+
 def cruise_performance(
     alt_ft: npt.NDArray[np.floating],
     mach: npt.NDArray[np.floating],
@@ -240,16 +263,7 @@ def climb_to_target(
     # Vectorize everything independent of the mass loop
     air_pressure = units.ft_to_pl(mid_alt_ft) * 100.0
     T_isa = units.m_to_T_isa(units.ft_to_m(mid_alt_ft))
-    mach_lim = ps_operational_limits.max_mach_number_by_altitude(
-        band_edges[:-1],
-        air_pressure,
-        atyp.max_mach_num,
-        atyp.p_i_max,
-        atyp.p_inf_co,
-        atm_speed_limit=True,
-        buffer=0.0,
-    )
-    mach = np.minimum(atyp.m_des, mach_lim)
+    mach = mach_schedule(mid_alt_ft, atyp)
     tas = units.mach_number_to_tas(mach, T_isa)
 
     rn = ps_model.reynolds_number(atyp.wing_surface_area, mach, T_isa, air_pressure)
@@ -367,16 +381,7 @@ def final_descent(
     air_pressure = units.ft_to_pl(band_mids) * 100.0
     T_isa = units.m_to_T_isa(units.ft_to_m(band_mids))
 
-    mach_lim = ps_operational_limits.max_mach_number_by_altitude(
-        band_mids,
-        air_pressure,
-        atyp.max_mach_num,
-        np.float32(atyp.p_i_max),
-        atyp.p_inf_co,
-        atm_speed_limit=True,
-        buffer=0.0,
-    )
-    mach = np.minimum(atyp.m_des, mach_lim)  # don't exceed design Mach
+    mach = mach_schedule(band_mids, atyp)
     tas = units.mach_number_to_tas(mach, T_isa)
 
     # Geometry of the bands
