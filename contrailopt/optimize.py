@@ -1620,6 +1620,7 @@ class Optimizer:
             dest_elev_ft=self.dest.elevation_ft,
             takeoff_time=self.takeoff_time,
             met_lookup=self.met_lookup,
+            allow_cooling_credit=self.allow_cooling_credit,
             on_wavefront=capture,
         )
 
@@ -1642,7 +1643,7 @@ class Optimizer:
         # Build animation on top of the DAG map
         pc = ccrs.PlateCarree()
         fig, ax = plt.subplots(figsize=(24, 12), subplot_kw={"projection": pc})
-        dag.plot(ax=ax)
+        dag.plot(ax=ax, show_edges=False)
 
         # Draw avoidance regions (densify edges along geodesics)
         if self.avoidance_regions:
