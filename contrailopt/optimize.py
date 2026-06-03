@@ -14,7 +14,7 @@ from pycontrails.core import airports
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.physics import geo, jet, units
 
-from contrailopt import ps
+from contrailopt import ps, slerp
 from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
 
 if TYPE_CHECKING:
@@ -1475,6 +1475,7 @@ class Optimizer:
         altitude_ft: float | None = None,
         time: pd.Timestamp | None = None,
         ax: "GeoAxes | None" = None,
+        show_wind_quiver: bool = True,
         **kwargs,
     ) -> "GeoAxes":
         """Plot met data on DAG nodes for a given flight level and time.
@@ -1506,6 +1507,26 @@ class Optimizer:
         if ax is None:
             ax = self.dag.plot(show_edges=False)
 
+        # Draw avoidance regions (densify edges along geodesics)
+        if self.avoidance_regions:
+            for coords in self.avoidance_regions:
+                poly_lons, poly_lats = [], []
+                closed = [*coords, coords[0]]
+                for (lon1, lat1), (lon2, lat2) in itertools.pairwise(closed):
+                    poly_lons.append(lon1)
+                    poly_lats.append(lat1)
+                    gc_lon, gc_lat = slerp.gc_npts(lon1, lat1, lon2, lat2, 50)
+                    poly_lons.extend(gc_lon)
+                    poly_lats.extend(gc_lat)
+                ax.fill(
+                    poly_lons,
+                    poly_lats,
+                    transform=ax.projection,
+                    alpha=0.3,
+                    color="red",
+                    zorder=3,
+                )
+
         ds = self.met_lookup.ds
 
         if altitude_ft is None:
@@ -1521,21 +1542,22 @@ class Optimizer:
         node_lon = self.dag.lon[has_edges]
         node_lat = self.dag.lat[has_edges]
 
-        u = sel.eastward_wind.values[node_sample_idx]
-        v = sel.northward_wind.values[node_sample_idx]
+        if show_wind_quiver:
+            u = sel.eastward_wind.values[node_sample_idx]
+            v = sel.northward_wind.values[node_sample_idx]
 
-        kwargs.setdefault("alpha", 0.6)
-        kwargs.setdefault("headwidth", 2)
-        kwargs.setdefault("headlength", 2)
-        kwargs.setdefault("headaxislength", 1.5)
-        ax.quiver(
-            node_lon,
-            node_lat,
-            u,
-            v,
-            transform=ax.projection,
-            **kwargs,
-        )
+            kwargs.setdefault("alpha", 0.6)
+            kwargs.setdefault("headwidth", 2)
+            kwargs.setdefault("headlength", 2)
+            kwargs.setdefault("headaxislength", 1.5)
+            ax.quiver(
+                node_lon,
+                node_lat,
+                u,
+                v,
+                transform=ax.projection,
+                **kwargs,
+            )
 
         if "eef_per_m" in ds:
             eef = sel.eef_per_m.values[node_sample_idx]
@@ -1589,8 +1611,6 @@ class Optimizer:
         from matplotlib.cm import ScalarMappable
         from matplotlib.collections import LineCollection
         from matplotlib.colors import BoundaryNorm
-
-        from contrailopt import slerp
 
         if self.result is None:
             raise ValueError("Call solve() first")
