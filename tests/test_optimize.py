@@ -5,6 +5,7 @@ import types
 import numpy as np
 import pandas as pd
 import pytest
+import xarray as xr
 from pycontrails import Flight
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.models.ps_model.ps_aircraft_params import PSAircraftEngineParams as PSParams
@@ -707,3 +708,44 @@ class TestOptimizer:
         )
         result = opt.solve(n_iter=1, payload=15_000.0)
         assert result.trip_fuel > 0.0
+
+    def test_dollar_tonne_co2e_no_met_raises(self) -> None:
+        """Setting dollar_tonne_co2e without met raises ValueError."""
+        with pytest.raises(ValueError, match="met must be provided"):
+            Optimizer("KJFK", "KBOS", "A320", pd.Timestamp("2024-06-01"), dollar_tonne_co2e=100.0)
+
+    def test_dollar_tonne_co2e_no_eef_raises(self) -> None:
+        """Setting dollar_tonne_co2e with met missing eef_per_m raises ValueError."""
+
+        # Minimal met dataset without eef_per_m
+        met = xr.Dataset(
+            {
+                "air_temperature": (
+                    ["longitude", "latitude", "level", "time"],
+                    np.zeros((2, 2, 1, 1)),
+                ),
+                "eastward_wind": (
+                    ["longitude", "latitude", "level", "time"],
+                    np.zeros((2, 2, 1, 1)),
+                ),
+                "northward_wind": (
+                    ["longitude", "latitude", "level", "time"],
+                    np.zeros((2, 2, 1, 1)),
+                ),
+            },
+            coords={
+                "longitude": [-74.0, -71.0],
+                "latitude": [40.0, 42.0],
+                "level": [250.0],
+                "time": [np.datetime64("2024-06-01")],
+            },
+        )
+        with pytest.raises(ValueError, match="eef_per_m"):
+            Optimizer(
+                "KJFK", "KBOS", "A320", pd.Timestamp("2024-06-01"), met=met, dollar_tonne_co2e=100.0
+            )
+
+        # Also raises when dollar_tonne_co2e is set via solve()
+        opt = Optimizer("KJFK", "KBOS", "A320", pd.Timestamp("2024-06-01"))
+        with pytest.raises(ValueError, match="met must be provided"):
+            opt.solve(dollar_tonne_co2e=100.0)

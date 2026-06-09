@@ -986,7 +986,7 @@ class Optimizer:
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
 
-        if dollar_tonne_co2e > 0.0:
+        if dollar_tonne_co2e:
             if met is None:
                 raise ValueError("met must be provided when dollar_tonne_co2e is set")
             if "eef_per_m" not in met:
@@ -1141,6 +1141,11 @@ class Optimizer:
             self.cost_index = float(cost_index)
         if dollar_tonne_co2e is not None:
             self.dollar_tonne_co2e = float(dollar_tonne_co2e)
+            if self.dollar_tonne_co2e:
+                if self.met_lookup is None:
+                    raise ValueError("met must be provided when dollar_tonne_co2e is set")
+                if "eef_per_m" not in self.met_lookup.ds:
+                    raise ValueError("met must contain 'eef_per_m' when dollar_tonne_co2e is set")
         if allow_cooling_credit is not None:
             self.allow_cooling_credit = allow_cooling_credit
         if aircraft_type is not None:
