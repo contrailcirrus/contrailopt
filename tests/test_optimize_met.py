@@ -206,7 +206,7 @@ class TestToFlight:
         assert len(fl) > 20  # densified waypoints, not just DAG nodes
 
         # Required columns present and finite
-        for col in ("mach_number", "air_temperature", "eastward_wind", "northward_wind"):
+        for col in ("mach_number", "air_temperature", "u_wind", "v_wind"):
             assert col in fl, f"Missing column: {col}"
             assert np.all(np.isfinite(fl[col])), f"Non-finite values in {col}"
 

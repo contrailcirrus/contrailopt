@@ -1470,8 +1470,8 @@ class Optimizer:
         data: dict[str, npt.NDArray] = {
             "mach_number": wpts["mach_number"],
             "air_temperature": wpts["air_temperature"],
-            "eastward_wind": wpts["eastward_wind"],
-            "northward_wind": wpts["northward_wind"],
+            "u_wind": wpts["eastward_wind"],  # use u/v names for pycontrails compatibility
+            "v_wind": wpts["northward_wind"],
         }
         data["node_index"] = wpts["node_index"]
         data["sample_index"] = wpts["sample_index"]
