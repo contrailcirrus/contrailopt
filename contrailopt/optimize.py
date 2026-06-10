@@ -9,7 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
-from pycontrails import Flight, JetA, MetDataset
+from pycontrails import Flight, JetA, MetDataArray, MetDataset
 from pycontrails.core import airports
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.physics import geo, jet, units
@@ -921,6 +921,11 @@ class Optimizer:
     met : MetDataset | xr.Dataset | None, default None
         Gridded met data with ``air_temperature``, ``eastward_wind``, and ``northward_wind``.
         If *None*, cruise performance uses ISA temperatures and zero wind.
+    eef : xr.DataArray | MetDataArray | None, default None
+        Optional ``eef_per_m`` DataArray on its own lon/lat grid. If provided,
+        EEF is interpolated onto sample points independently from the weather grid, avoiding
+        the need to pre-merge onto a common grid. Takes precedence over ``eef_per_m`` in
+        ``met`` if both are present. Assumed to adhere to pycontrails ``MetDataArray`` conventions.
     dag : HorizontalDAG or None, default None
         Pre-built DAG. If *None*, a DAG is generated via Poisson-disk sampling along the
         great circle. The DAG origin and destination must agree with the airport coordinates.
@@ -929,8 +934,8 @@ class Optimizer:
         favoring faster (and more fuel-intensive) routes.
     dollar_tonne_co2e : float, default 0.0
         Carbon price in US dollars per tonne (1000kg) of CO2-equivalent. A value of
-        0.0 disables the carbon cost term. If positive, the ``met`` parameter must be provided
-        with a ``eef_per_m`` variable giving the expected effective energy forcing in J per meter.
+        0.0 disables the carbon cost term. If positive, either ``met`` must contain a
+        ``eef_per_m`` variable or the ``eef`` parameter must be provided.
     dollar_kg_fuel : float, default 1.0
         Fuel price in US dollars per kg. Only used to convert the carbon cost into the
         fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
@@ -961,6 +966,7 @@ class Optimizer:
         takeoff_time: pd.Timestamp,
         *,
         met: MetDataset | xr.Dataset | None = None,
+        eef: xr.DataArray | MetDataArray | None = None,
         dag: HorizontalDAG | None = None,
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
@@ -989,8 +995,11 @@ class Optimizer:
         if dollar_tonne_co2e:
             if met is None:
                 raise ValueError("met must be provided when dollar_tonne_co2e is set")
-            if "eef_per_m" not in met:
-                raise ValueError("met must contain 'eef_per_m' when dollar_tonne_co2e is set")
+            if "eef_per_m" not in met and eef is None:
+                raise ValueError(
+                    "met must contain 'eef_per_m' or eef must be provided"
+                    " when dollar_tonne_co2e is set"
+                )
 
         self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions, **kwargs)
         self.avoidance_regions = avoidance_regions
@@ -1009,6 +1018,7 @@ class Optimizer:
                 takeoff_time=self.takeoff_time,
                 flight_hours=flight_hours,
                 spacing_m=met_spacing_m,
+                eef=eef,
             )
         else:
             self.met_lookup = None
@@ -1024,6 +1034,7 @@ class Optimizer:
         aircraft_type: str | None = None,
         *,
         met: MetDataset | xr.Dataset | None = None,
+        eef: xr.DataArray | MetDataArray | None = None,
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
@@ -1070,6 +1081,7 @@ class Optimizer:
             aircraft_type,
             pd.Timestamp(flight["time"][0]),
             met=met,
+            eef=eef,
             dag=dag,
             cost_index=cost_index,
             dollar_tonne_co2e=dollar_tonne_co2e,

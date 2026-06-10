@@ -287,3 +287,56 @@ class TestToFlight:
         # Should contain both positive and negative values given the spatial pattern
         assert np.any(fl["eef_per_m"] > 0)
         assert np.any(fl["eef_per_m"] < 0)
+
+    def test_separate_eef_parameter(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+    ) -> None:
+        """Passing eef as a separate DataArray on a different grid works."""
+        origin, dest = route
+
+        # Build EEF on a deliberately different (coarser) lon/lat grid
+        eef_lons = np.arange(-90.0, -69.0, 2.5)
+        eef_lats = np.arange(35.0, 50.0, 2.5)
+        levels = met.data["level"].values
+        times = met.data["time"].values
+
+        shape = (len(eef_lons), len(eef_lats), len(levels), len(times))
+        eef_sign = np.where(eef_lons < -80.0, 1.0, -1.0)
+        eef_values = np.broadcast_to(
+            (eef_sign * 1e-9)[:, np.newaxis, np.newaxis, np.newaxis], shape
+        ).astype(np.float32)
+
+        da_eef = xr.DataArray(
+            eef_values,
+            dims=["longitude", "latitude", "level", "time"],
+            coords={
+                "longitude": eef_lons,
+                "latitude": eef_lats,
+                "level": levels,
+                "time": times,
+            },
+            name="eef_per_m",
+        )
+
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            eef=da_eef,
+            dag=line_dag,
+            cost_index=30.0,
+            dollar_tonne_co2e=100.0,
+            met_spacing_m=40_000.0,
+        )
+        opt.solve(n_iter=2, payload=15_000.0)
+        fl = opt.to_flight()
+
+        assert "eef_per_m" in fl
+        assert np.all(np.isfinite(fl["eef_per_m"]))
+        assert np.any(fl["eef_per_m"] > 0)
+        assert np.any(fl["eef_per_m"] < 0)

@@ -9,7 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
-from pycontrails import Flight, MetDataset
+from pycontrails import Flight, MetDataArray, MetDataset
 from pycontrails.core import airports
 from pycontrails.physics import geo, units
 
@@ -881,6 +881,7 @@ class EdgeMetLookup:
         takeoff_time: pd.Timestamp,
         flight_hours: int,
         spacing_m: float,
+        eef: xr.DataArray | MetDataArray | None = None,
     ) -> Self:
         """Interpolate met data onto ``dag`` edge sample points.
 
@@ -903,6 +904,12 @@ class EdgeMetLookup:
             Number of hourly time steps to retain starting from takeoff_time.
         spacing_m : float
             Spacing in meters between sample points along edges. Passed to ``dag.sample_edges``.
+        eef : xr.DataArray | MetDataArray | None, default None
+            Optional "eef_per_m" DataArray on its own lon/lat grid.
+            If provided, EEF is interpolated onto sample points independently from the
+            weather grid, avoiding the need to pre-merge onto a common grid.
+            Takes precedence over "eef_per_m" in ``met`` if both are present.
+            Assumed to adhere to pycontrails ``MetDataArray`` conventions.
 
         Returns
         -------
@@ -934,7 +941,7 @@ class EdgeMetLookup:
         ds = met.data if isinstance(met, MetDataset) else met
 
         variables = ["air_temperature", "eastward_wind", "northward_wind"]
-        if "eef_per_m" in ds:
+        if "eef_per_m" in ds and eef is None:
             variables.append("eef_per_m")
         ds = ds[variables]
 
@@ -989,8 +996,27 @@ class EdgeMetLookup:
                 raise ValueError(f"NaN values found in '{var}' after interpolation onto samples")
 
         # NaN-fill eef_per_m with 0.0. If NaNs are kept, downstream computations would be poisoned.
-        if "eef_per_m" in ds:
+        if "eef_per_m" in ds:  # if eef is not None, this is skipped
             ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
+
+        # If a separate eef DataArray is provided, interpolate it onto sample points independently
+        if eef is not None:
+            da_eef = eef.data if isinstance(eef, MetDataArray) else eef
+            ds_eef = da_eef.to_dataset(name="eef_per_m")
+            ds_eef = ds_eef.sel(time=usable)
+
+            ds_eef_altitude_ft = units.pl_to_ft(ds_eef["level"])
+            ds_eef = ds_eef.assign_coords(altitude_ft=ds_eef_altitude_ft).swap_dims(
+                level="altitude_ft"
+            )
+            try:
+                ds_eef = ds_eef.sel(altitude_ft=altitude_ft, method="nearest", tolerance=50.0)
+            except KeyError:
+                ds_eef = ds_eef.interp(altitude_ft=altitude_ft)
+                ds_eef["eef_per_m"] = ds_eef["eef_per_m"].astype(np.float32)
+
+            ds_eef = _bilinear_interp(ds_eef, sample_lon, sample_lat)
+            ds["eef_per_m"] = ds_eef["eef_per_m"].fillna(0.0)
 
         return cls(
             ds=ds,
