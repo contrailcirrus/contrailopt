@@ -1012,8 +1012,11 @@ class EdgeMetLookup:
                 ds_eef = ds_eef.interp(altitude_ft=altitude_ft)
                 ds_eef["eef_per_m"] = ds_eef["eef_per_m"].astype(np.float32)
 
-            ds_eef = _bilinear_interp(ds_eef, sample_lon, sample_lat)
-            ds["eef_per_m"] = ds_eef["eef_per_m"].fillna(0.0)
+            da_eef = _bilinear_interp(ds_eef, sample_lon, sample_lat)["eef_per_m"].fillna(0.0)
+            # Bypass xarray coord alignment - eef and met altitude_ft values may differ slightly
+            # snapping to the same altitude_ft (we use sel(..., method="nearest", tolerance=50.0))
+            # in some places), so we can't rely on xarray to automatically align
+            ds["eef_per_m"] = (("sample", "altitude_ft", "time"), da_eef.values)
 
         return cls(
             ds=ds,
