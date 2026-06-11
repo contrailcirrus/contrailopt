@@ -981,9 +981,6 @@ class EdgeMetLookup:
             ds = ds.sel(altitude_ft=altitude_ft, method="nearest", tolerance=50.0)
         except KeyError:
             ds = ds.interp(altitude_ft=altitude_ft)
-            # Ensure float32 — interp promotes to float64
-            for var in ds:
-                ds[var] = ds[var].astype(np.float32)
 
         # Interpolate horizontally onto sample points
         # Calling ds.interp chews up too much memory and the pycontrails RGI isn't
@@ -1124,6 +1121,7 @@ def _bilinear_interp(
             raise ValueError(f"Unexpected dimensions for variable {name}: {da.dims}")
 
         v = da.values  # this materializes data into memory if not already loaded
+        v = v.astype(np.float32, copy=False)  # some dask bug can cause float64 to leak thorugh
         f00 = v[i, j]
         f01 = v[i + 1, j]
         f10 = v[i, j + 1]
