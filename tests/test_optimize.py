@@ -228,14 +228,19 @@ class TestComputeGroundClimbs:
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
 
         dist, fuel, time, mass, feasible = _compute_ground_climbs(
-            fl_choices, 70_000.0, atyp, 1_000.0
+            fl_choices,
+            70_000.0,
+            atyp,
+            1_000.0,
+            np.zeros((1, 1), dtype=FLOAT_DTYPE),
+            np.zeros((1, 1), dtype=FLOAT_DTYPE),
         )
 
-        assert dist.shape == (3,)
-        assert fuel.shape == (3,)
-        assert time.shape == (3,)
-        assert mass.shape == (3,)
-        assert feasible.shape == (3,)
+        assert dist.shape == (1, 3)
+        assert fuel.shape == (1, 3)
+        assert time.shape == (1, 3)
+        assert mass.shape == (1, 3)
+        assert feasible.shape == (1, 3)
         assert dist.dtype == FLOAT_DTYPE
         assert fuel.dtype == FLOAT_DTYPE
         assert mass.dtype == FLOAT_DTYPE
@@ -244,7 +249,14 @@ class TestComputeGroundClimbs:
         """Higher FL requires more distance, fuel, and time from ground."""
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
 
-        dist, fuel, time, _, _ = _compute_ground_climbs(fl_choices, 70_000.0, atyp, 1_000.0)
+        dist, fuel, time, _, _ = _compute_ground_climbs(
+            fl_choices,
+            70_000.0,
+            atyp,
+            1_000.0,
+            np.zeros((1, 1), dtype=FLOAT_DTYPE),
+            np.zeros((1, 1), dtype=FLOAT_DTYPE),
+        )
 
         assert np.all(np.diff(dist) > 0)
         assert np.all(np.diff(fuel) > 0)

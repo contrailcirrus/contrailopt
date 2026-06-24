@@ -333,6 +333,8 @@ def _compute_ground_climbs(
     src_mass: float,
     atyp: ps_aircraft_params.PSAircraftEngineParams,
     origin_elev_ft: float,
+    delta_isa: npt.NDArray[FLOAT_DTYPE],
+    tailwind: npt.NDArray[FLOAT_DTYPE],
 ) -> tuple[
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
@@ -340,9 +342,23 @@ def _compute_ground_climbs(
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[np.bool_],
 ]:
-    """Compute windless ISA climb from the ground to each candidate FL.
+    """Compute climb from the ground to each candidate FL.
 
-    Only used for the origin wavefront. Returns five arrays of shape ``(n_fl,)``.
+    Only used for the origin wavefront. The low-altitude phase (ground to
+    ``fl_choices[0]``) always uses ISA temperature + zero wind.
+    The upper phase (``fl_choices[0]`` to each FL) uses the
+    provided ``delta_isa`` and ``tailwind``.
+
+    Parameters
+    ----------
+    delta_isa : npt.NDArray[FLOAT_DTYPE]
+        Temperature offset from ISA at base_alt. Shape ``(n_edge, 1)``.
+    tailwind : npt.NDArray[FLOAT_DTYPE]
+        Along-track tailwind component in m/s. Shape ``(n_edge, 1)``.
+
+    Returns
+    -------
+    Five arrays each of shape ``(n_edge, n_fl)``.
     """
     base_alt = fl_choices[0]
     init_dist, init_fuel, init_time, base_mass = ps.climb_to_target(
@@ -356,8 +372,8 @@ def _compute_ground_climbs(
         fl_choices,
         FLOAT_DTYPE(base_mass),
         atyp,
-        delta_isa=0.0,
-        tailwind=0.0,
+        delta_isa=delta_isa,
+        tailwind=tailwind,
     )
 
     climb_dist = init_dist + next_dist
@@ -514,19 +530,36 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     # Climb from src_fl to each dst_fl: (n_edge, n_fl)
     ground_fi = len(fl_choices)
     if (fl_idxs == ground_fi).any():
-        # Origin wavefront: ISA climb from ground, broadcast to (n_edge, n_fl)
+        # Origin wavefront: climb from ground, with met-based corrections if available
+        n_edge = len(src_idx)
+
+        if ctx.met_lookup is not None:
+            edge_start = ctx.met_lookup.edge_ptr[flat_edge_idx]
+            src_time = np.broadcast_to(np.datetime64(ctx.takeoff_time), (n_edge, len(fl_choices)))
+            climb_met = ctx.met_lookup(edge_start, src_time)
+
+            # Use lowest FL index for temperature/wind (closest to base_alt)
+            met_T = climb_met.air_temperature[:, 0]
+            base_alt = fl_choices[0]
+            isa_T = units.m_to_T_isa(units.ft_to_m(base_alt))
+            delta_isa = (met_T - isa_T)[:, np.newaxis]
+
+            az = ctx.met_lookup.sample_azimuth[edge_start]
+            u = climb_met.eastward_wind[:, 0]
+            v = climb_met.northward_wind[:, 0]
+            tailwind = (u * np.sin(az) + v * np.cos(az))[:, np.newaxis]
+        else:
+            delta_isa = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
+            tailwind = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
+
         climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_ground_climbs(
             fl_choices,
             src_masses[0],
             ctx.atyp,
             ctx.origin_elev_ft,
+            delta_isa,
+            tailwind,
         )
-        n_edge = len(src_idx)
-        climb_dist = np.broadcast_to(climb_dist, (n_edge, n_fl))
-        climb_fuel = np.broadcast_to(climb_fuel, (n_edge, n_fl))
-        climb_time = np.broadcast_to(climb_time, (n_edge, n_fl))
-        post_climb_mass = np.broadcast_to(post_climb_mass, (n_edge, n_fl))
-        feasible = np.broadcast_to(feasible, (n_edge, n_fl))
     else:
         climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_edge_climbs(
             fl_idxs,
