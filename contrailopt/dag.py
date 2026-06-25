@@ -985,6 +985,7 @@ class EdgeMetLookup:
         # Interpolate horizontally onto sample points
         # Calling ds.interp chews up too much memory and the pycontrails RGI isn't
         # exactly designed for this, so just call custom numpy-based _bilinear_interp
+        ds = _localize(ds, sample_lon, sample_lat)
         ds = _bilinear_interp(ds, sample_lon, sample_lat)
 
         # Raise on NaN in core weather - downstream computations would be poisoned.
@@ -1012,6 +1013,7 @@ class EdgeMetLookup:
                 ds_eef = ds_eef.interp(altitude_ft=altitude_ft)
                 ds_eef["eef_per_m"] = ds_eef["eef_per_m"].astype(np.float32)
 
+            ds_eef = _localize(ds_eef, sample_lon, sample_lat)
             da_eef = _bilinear_interp(ds_eef, sample_lon, sample_lat)["eef_per_m"].fillna(0.0)
             # Bypass xarray coord alignment - eef and met altitude_ft values may differ slightly
             # snapping to the same altitude_ft (we use sel(..., method="nearest", tolerance=50.0))
@@ -1089,6 +1091,27 @@ def _dual_az_edges(
     return edges, edge_dist
 
 
+def _localize(
+    ds: xr.Dataset,
+    sample_lon: npt.NDArray[np.floating],
+    sample_lat: npt.NDArray[np.floating],
+) -> xr.Dataset:
+    """Crop ds to the lon/lat bounding box of the sample points.
+
+    TODO: across the antimeridian, sample_lon spans nearly [-180, 180), so the
+    box degenerates to the full grid
+    """
+    lon = ds["longitude"].values
+    lat = ds["latitude"].values
+
+    i0 = max(np.searchsorted(lon, sample_lon.min()).item() - 2, 0)
+    i1 = np.searchsorted(lon, sample_lon.max()).item() + 2
+    j0 = max(np.searchsorted(lat, sample_lat.min()).item() - 2, 0)
+    j1 = np.searchsorted(lat, sample_lat.max()).item() + 2
+
+    return ds.isel(longitude=slice(i0, i1), latitude=slice(j0, j1))
+
+
 def _bilinear_interp(
     ds: xr.Dataset,
     sample_lon: npt.NDArray[np.floating],
@@ -1117,6 +1140,11 @@ def _bilinear_interp(
     wx = wx.astype(np.float32)[:, np.newaxis, np.newaxis]
     wy = wy.astype(np.float32)[:, np.newaxis, np.newaxis]
 
+    w00 = (1.0 - wx) * (1.0 - wy)
+    w01 = wx * (1.0 - wy)
+    w10 = (1.0 - wx) * wy
+    w11 = wx * wy
+
     result_vars = {}
     for name, da in ds.items():
         # data shape: (longitude, latitude, altitude_ft, time)
@@ -1130,12 +1158,7 @@ def _bilinear_interp(
         f10 = v[i, j + 1]
         f11 = v[i + 1, j + 1]
 
-        val = (
-            (1.0 - wx) * (1.0 - wy) * f00
-            + wx * (1.0 - wy) * f01
-            + (1.0 - wx) * wy * f10
-            + wx * wy * f11
-        )
+        val = w00 * f00 + w01 * f01 + w10 * f10 + w11 * f11
         result_vars[name] = (("sample", "altitude_ft", "time"), val)
 
     return xr.Dataset(
