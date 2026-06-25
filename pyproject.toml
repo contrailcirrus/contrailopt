@@ -1,9 +1,12 @@
 [project]
 name = "contrailopt"
-dynamic = ["version"]
-requires-python = ">=3.11"
 authors = [{ name = "Contrails.org", email = "py@contrails.org" }]
+dynamic = ["version"]
 description = "Contrail-aware flight optimization"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11"
 dependencies = [
     "numpy",
     "pandas",
