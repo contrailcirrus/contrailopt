@@ -1,6 +1,5 @@
 """Utilities for horizontal DAG construction."""
 
-import warnings
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
@@ -11,8 +10,14 @@ import pandas as pd
 import xarray as xr
 from pycontrails import Flight, MetDataArray, MetDataset
 from pycontrails.core import airports
-from pycontrails.physics import geo, units
+from pycontrails.physics import geo
 
+from contrailopt.grid_utils import (
+    bilinear_interp,
+    localize_horizontally,
+    select_flight_times,
+    to_altitude_ft,
+)
 from contrailopt.slerp import gc_interp, gc_npts, spherical_fwd
 
 if TYPE_CHECKING:
@@ -937,56 +942,37 @@ class EdgeMetLookup:
         )
         sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
 
-        # Ensure variables
-        ds = met.data if isinstance(met, MetDataset) else met
+        if isinstance(met, MetDataset):
+            ds = met.data
+            metdataset_init = False
+        else:
+            ds = met
+            metdataset_init = True
 
+        # Ensure variables
         variables = ["air_temperature", "eastward_wind", "northward_wind"]
         if "eef_per_m" in ds and eef is None:
             variables.append("eef_per_m")
         ds = ds[variables]
 
-        # Downselect met in time
-        # We're assuming that met has hourly spacing, which could be relaxed
-        if takeoff_time.tzinfo:
-            takeoff_time = takeoff_time.tz_convert("UTC").tz_localize(None)
-        t0 = takeoff_time.floor("1h")
-        extra = t0 < takeoff_time
-        times = pd.date_range(t0, periods=flight_hours + extra + 1, freq="h")
-        available = pd.DatetimeIndex(ds["time"])
-        usable = times[times.isin(available)]
-
-        if len(usable) == 0:
-            raise ValueError(
-                f"No met data available in the estimated flight window.\n"
-                f"Required: {times[0]} ... {times[-1]}.\n"
-                f"Available: {available[0]} ... {available[-1]}"
-            )
-
-        if len(usable) < len(times):
-            warnings.warn(
-                f"The met data covers {len(usable)} / {len(times)} estimated flight hours. "
-                f"The met time extends to {usable[-1]}, but candidate flights may reach "
-                f"{times[-1]}. If needed, met will be extrapolated outside its domain.",
-                stacklevel=2,
-            )
-
+        # Downselect in time
+        usable = select_flight_times(ds, takeoff_time, flight_hours)
         ds = ds.sel(time=usable)
 
-        # Convert to altitude_ft coordinates
-        ds_altitude_ft = units.pl_to_ft(ds["level"])
-        ds = ds.assign_coords(altitude_ft=ds_altitude_ft).swap_dims(level="altitude_ft")
+        # Now run through MetDataset constructor if needed. Do after .sel(time) for memory-sake
+        if metdataset_init:
+            ds = MetDataset(ds).data
 
-        # Select or interpolate vertically on FL choices
-        try:
-            ds = ds.sel(altitude_ft=altitude_ft, method="nearest", tolerance=50.0)
-        except KeyError:
-            ds = ds.interp(altitude_ft=altitude_ft)
+        # Downselect horizontally to reduce memory consumption
+        ds = localize_horizontally(ds, sample_lon, sample_lat)
+
+        # Convert to altitude_ft coordinates and select vertically on FL choices
+        ds = to_altitude_ft(ds, altitude_ft)
 
         # Interpolate horizontally onto sample points
         # Calling ds.interp chews up too much memory and the pycontrails RGI isn't
-        # exactly designed for this, so just call custom numpy-based _bilinear_interp
-        ds = _localize(ds, sample_lon, sample_lat)
-        ds = _bilinear_interp(ds, sample_lon, sample_lat)
+        # exactly designed for this, so just call custom numpy-based bilinear_interp
+        ds = bilinear_interp(ds, sample_lon, sample_lat)
 
         # Raise on NaN in core weather - downstream computations would be poisoned.
         for var in ("air_temperature", "eastward_wind", "northward_wind"):
@@ -999,22 +985,28 @@ class EdgeMetLookup:
 
         # If a separate eef DataArray is provided, interpolate it onto sample points independently
         if eef is not None:
-            da_eef = eef.data if isinstance(eef, MetDataArray) else eef
+            if isinstance(eef, MetDataArray):
+                da_eef = eef.data
+                metdataset_init = False
+            else:
+                da_eef = eef
+                metdataset_init = True
+
             ds_eef = da_eef.to_dataset(name="eef_per_m")
+
+            # Downselect in time
             ds_eef = ds_eef.sel(time=usable)
 
-            ds_eef_altitude_ft = units.pl_to_ft(ds_eef["level"])
-            ds_eef = ds_eef.assign_coords(altitude_ft=ds_eef_altitude_ft).swap_dims(
-                level="altitude_ft"
-            )
-            try:
-                ds_eef = ds_eef.sel(altitude_ft=altitude_ft, method="nearest", tolerance=50.0)
-            except KeyError:
-                ds_eef = ds_eef.interp(altitude_ft=altitude_ft)
-                ds_eef["eef_per_m"] = ds_eef["eef_per_m"].astype(np.float32)
+            # Now run through MetDataset constructor if needed. Do after .sel(time) for memory-sake
+            if metdataset_init:
+                ds_eef = MetDataset(ds_eef).data
 
-            ds_eef = _localize(ds_eef, sample_lon, sample_lat)
-            da_eef = _bilinear_interp(ds_eef, sample_lon, sample_lat)["eef_per_m"].fillna(0.0)
+            # Downselect horizontally to reduce memory consumption
+            ds_eef = localize_horizontally(ds_eef, sample_lon, sample_lat)
+
+            ds_eef = to_altitude_ft(ds_eef, altitude_ft)
+
+            da_eef = bilinear_interp(ds_eef, sample_lon, sample_lat)["eef_per_m"].fillna(0.0)
             # Bypass xarray coord alignment - eef and met altitude_ft values may differ slightly
             # snapping to the same altitude_ft (we use sel(..., method="nearest", tolerance=50.0))
             # in some places), so we can't rely on xarray to automatically align
@@ -1089,83 +1081,3 @@ def _dual_az_edges(
     edges = np.column_stack([tail[keep], head[keep]])
     edge_dist = dist[tail[keep], head[keep]]
     return edges, edge_dist
-
-
-def _localize(
-    ds: xr.Dataset,
-    sample_lon: npt.NDArray[np.floating],
-    sample_lat: npt.NDArray[np.floating],
-) -> xr.Dataset:
-    """Crop ds to the lon/lat bounding box of the sample points.
-
-    TODO: across the antimeridian, sample_lon spans nearly [-180, 180), so the
-    box degenerates to the full grid
-    """
-    lon = ds["longitude"].values
-    lat = ds["latitude"].values
-
-    i0 = max(np.searchsorted(lon, sample_lon.min()).item() - 2, 0)
-    i1 = np.searchsorted(lon, sample_lon.max()).item() + 2
-    j0 = max(np.searchsorted(lat, sample_lat.min()).item() - 2, 0)
-    j1 = np.searchsorted(lat, sample_lat.max()).item() + 2
-
-    return ds.isel(longitude=slice(i0, i1), latitude=slice(j0, j1))
-
-
-def _bilinear_interp(
-    ds: xr.Dataset,
-    sample_lon: npt.NDArray[np.floating],
-    sample_lat: npt.NDArray[np.floating],
-) -> xr.Dataset:
-    """Bilinear interpolation of ds onto sample points without full-grid intermediates.
-
-    Assumes ds has dimensions (time, altitude_ft, latitude, longitude) and that
-    longitude and latitude coordinates are regularly spaced and ascending.
-
-    Returns a Dataset with a "sample" dimension replacing longitude/latitude.
-    """
-    lon_coord = ds["longitude"].values
-    lat_coord = ds["latitude"].values
-
-    # Find bounding indices
-    i = np.searchsorted(lon_coord, sample_lon) - 1
-    j = np.searchsorted(lat_coord, sample_lat) - 1
-    np.clip(i, 0, len(lon_coord) - 2, out=i)
-    np.clip(j, 0, len(lat_coord) - 2, out=j)
-
-    # Fractional weights
-    wx = (sample_lon - lon_coord[i]) / (lon_coord[i + 1] - lon_coord[i])
-    wy = (sample_lat - lat_coord[j]) / (lat_coord[j + 1] - lat_coord[j])
-
-    wx = wx.astype(np.float32)[:, np.newaxis, np.newaxis]
-    wy = wy.astype(np.float32)[:, np.newaxis, np.newaxis]
-
-    w00 = (1.0 - wx) * (1.0 - wy)
-    w01 = wx * (1.0 - wy)
-    w10 = (1.0 - wx) * wy
-    w11 = wx * wy
-
-    result_vars = {}
-    for name, da in ds.items():
-        # data shape: (longitude, latitude, altitude_ft, time)
-        if da.dims != ("longitude", "latitude", "altitude_ft", "time"):
-            raise ValueError(f"Unexpected dimensions for variable {name}: {da.dims}")
-
-        v = da.values  # this materializes data into memory if not already loaded
-        v = v.astype(np.float32, copy=False)  # some dask bug can cause float64 to leak thorugh
-        f00 = v[i, j]
-        f01 = v[i + 1, j]
-        f10 = v[i, j + 1]
-        f11 = v[i + 1, j + 1]
-
-        val = w00 * f00 + w01 * f01 + w10 * f10 + w11 * f11
-        result_vars[name] = (("sample", "altitude_ft", "time"), val)
-
-    return xr.Dataset(
-        result_vars,
-        coords={
-            "sample": np.arange(len(sample_lon), dtype=np.int64),
-            "altitude_ft": ds["altitude_ft"],
-            "time": ds["time"],
-        },
-    )
