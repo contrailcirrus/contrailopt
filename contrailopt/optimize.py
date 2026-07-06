@@ -1526,6 +1526,7 @@ class Optimizer:
         time: pd.Timestamp | None = None,
         ax: "GeoAxes | None" = None,
         show_wind_quiver: bool = True,
+        show_eef: bool = True,
         **kwargs,
     ) -> "GeoAxes":
         """Plot met data on DAG nodes for a given flight level and time.
@@ -1609,7 +1610,7 @@ class Optimizer:
                 **kwargs,
             )
 
-        if "eef_per_m" in ds:
+        if show_eef and "eef_per_m" in ds:
             eef = sel.eef_per_m.values[node_sample_idx]
             finite = np.isfinite(eef)
             vmax = np.abs(eef[finite]).max()
