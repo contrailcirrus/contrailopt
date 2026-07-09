@@ -503,25 +503,22 @@ class HorizontalDAG:
         import matplotlib.pyplot as plt
         from matplotlib.collections import LineCollection
 
+        data_crs = ccrs.Geodetic()
+
         if ax is None:
             central_lon = 180.0 if self.crosses_antimeridian else 0.0
             proj = ccrs.PlateCarree(central_longitude=central_lon)
             _, ax = plt.subplots(figsize=(20, 10), subplot_kw={"projection": proj})
 
-            plot_lon = (self.lon - central_lon + 180.0) % 360.0 - 180.0
             ax.set_extent(
                 [
-                    plot_lon.min() - 2.0,
-                    plot_lon.max() + 2.0,
+                    self.lon.min() - 2.0,
+                    self.lon.max() + 2.0,
                     self.lat.min() - 2.0,
                     self.lat.max() + 2.0,
                 ],
-                crs=proj,
+                crs=data_crs,
             )
-        else:
-            proj = ax.projection
-            central_lon = proj.proj4_params.get("lon_0", 0.0)
-            plot_lon = (self.lon - central_lon + 180.0) % 360.0 - 180.0
 
         ax.add_feature(cfeature.LAND, facecolor="whitesmoke")
         ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
@@ -533,8 +530,8 @@ class HorizontalDAG:
             edge_src = self.edge_src
             segments = np.stack(
                 [
-                    np.column_stack([plot_lon[edge_src], self.lat[edge_src]]),
-                    np.column_stack([plot_lon[self.adj], self.lat[self.adj]]),
+                    np.column_stack([self.lon[edge_src], self.lat[edge_src]]),
+                    np.column_stack([self.lon[self.adj], self.lat[self.adj]]),
                 ],
                 axis=1,
             )
@@ -543,26 +540,26 @@ class HorizontalDAG:
                 colors="steelblue",
                 linewidths=linewidth,
                 alpha=0.2,
-                transform=proj,
+                transform=data_crs,
             )
             ax.add_collection(lc)
 
         # Draw nodes
-        ax.scatter(plot_lon, self.lat, s=2, color="black", transform=proj, zorder=5)
+        ax.scatter(self.lon, self.lat, s=2, color="black", transform=data_crs, zorder=5)
         ax.plot(
-            plot_lon[self.h_origin],
+            self.lon[self.h_origin],
             self.lat[self.h_origin],
             "ro",
             markersize=8,
-            transform=proj,
+            transform=data_crs,
             zorder=10,
         )
         ax.plot(
-            plot_lon[self.h_dest],
+            self.lon[self.h_dest],
             self.lat[self.h_dest],
             "go",
             markersize=8,
-            transform=proj,
+            transform=data_crs,
             zorder=10,
         )
 
