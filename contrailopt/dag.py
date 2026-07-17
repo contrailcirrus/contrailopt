@@ -259,6 +259,15 @@ class HorizontalDAG:
         matrix[self.edge_src, self.adj] = True
         return matrix
 
+    def distance_matrix(self, missing: float = np.inf) -> npt.NDArray[np.floating]:
+        """Return dense distance matrix A where A[i, j] is the distance aong i->j.
+
+        Distances are set to infinity by default where edges are missing.
+        """
+        matrix = np.full((self.n_nodes, self.n_nodes), missing, dtype=self.edge_dist.dtype)
+        matrix[self.edge_src, self.adj] = self.edge_dist
+        return matrix
+
     def reverse(self) -> Self:
         """Return a new DAG with all edge directions flipped and origin/dest swapped."""
         src = self.edge_src
@@ -567,17 +576,18 @@ class HorizontalDAG:
         return ax
 
     @classmethod
-    def from_points(
+    def from_network(
         cls,
         lon: npt.NDArray[np.floating],
         lat: npt.NDArray[np.floating],
+        tail: npt.NDArray[np.int64],
+        head: npt.NDArray[np.int64],
         origin_idx: int = 0,
         dest_idx: int = -1,
-        max_angle_deg: float = 40.0,
-        max_dist_m: float = 500_000.0,
+        max_angle_deg: float = 40.0
     ) -> Self:
-        """Build a DAG from lon/lat arrays using the dual azimuth constraint."""
-        edges, dists = _dual_az_edges(lon, lat, origin_idx, dest_idx, max_angle_deg, max_dist_m)
+        """Build a DAG from a static network graph using the dual azimuth constraint."""
+        edges, dists = _dual_az_edges(lon, lat, tail, head, origin_idx, dest_idx, max_angle_deg)
 
         n = len(lon)
         order = np.argsort(edges[:, 0])
@@ -594,6 +604,20 @@ class HorizontalDAG:
             h_origin=origin_idx if origin_idx >= 0 else n + origin_idx,
             h_dest=dest_idx if dest_idx >= 0 else n + dest_idx,
         )
+
+    @classmethod
+    def from_points(
+        cls,
+        lon: npt.NDArray[np.floating],
+        lat: npt.NDArray[np.floating],
+        origin_idx: int = 0,
+        dest_idx: int = -1,
+        max_angle_deg: float = 40.0,
+        max_dist_m: float = 500_000.0,
+    ) -> Self:
+        """Build a DAG from lon/lat arrays using the dual azimuth constraint."""
+        tail, head = _neighborhood_edges(lon, lat, max_dist_m)
+        return cls.from_network(lon, lat, tail, head, origin_idx, dest_idx, max_angle_deg)
 
     @classmethod
     def from_poisson(
@@ -1021,15 +1045,43 @@ class EdgeMetLookup:
         )
 
 
+def _neighborhood_edges(
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
+    max_dist_m: float = 500_000.0
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    """Build network of directed edges based on distance constraint.
+
+    A pair of directed edges tail -> head is returned for each pair
+    of nodes within ``max_dist_m`` of each other.
+
+    Returns
+    -------
+    tail : npt.NDArray[np.int64]
+        ``(m,)`` array of tail indices
+    head : npt.NDArray[np.int64]
+        ``(m,)`` array of head indices
+    """
+    dist = geo.haversine(
+        lon[:, np.newaxis],
+        lat[:, np.newaxis],
+        lon[np.newaxis, :],
+        lat[np.newaxis, :],
+    )
+    tail, head = np.nonzero((dist > 0.0) & (dist <= max_dist_m))
+    return tail, head
+
+
 def _dual_az_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
+    tail: npt.NDArray[np.int64],
+    head: npt.NDArray[np.int64],
     origin_idx: int,
     dest_idx: int,
-    max_angle_deg: float = 40.0,
-    max_dist_m: float = 500_000.0,
+    max_angle_deg: float = 40.0
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
-    """Build directed edges using a dual azimuth constraint.
+    """Filter directed edges using a dual azimuth constraint.
 
     For each pair of nodes within ``max_dist_m``, the directed edge tail -> head
     is included iff:
@@ -1051,16 +1103,6 @@ def _dual_az_edges(
     edge_dist : npt.NDArray[np.floating]
         ``(m,)`` haversine distances in meters. The dtype matches the input lon/lat dtype.
     """
-    # Build 2d array of all candidate pairs within distance threshold
-    # If this gets expensive, we could use a KDTree approach instead
-    dist = geo.haversine(
-        lon[:, np.newaxis],
-        lat[:, np.newaxis],
-        lon[np.newaxis, :],
-        lat[np.newaxis, :],
-    )
-    tail, head = np.nonzero((dist > 0.0) & (dist <= max_dist_m))
-
     # Precompute per-node azimuths from each node to dest and origin
     az_to_dest = geo.azimuth(lon, lat, lon[dest_idx], lat[dest_idx])
     az_to_origin = geo.azimuth(lon, lat, lon[origin_idx], lat[origin_idx])
@@ -1076,5 +1118,5 @@ def _dual_az_edges(
 
     keep = (delta_tail <= max_angle_deg) & (delta_head <= max_angle_deg)
     edges = np.column_stack([tail[keep], head[keep]])
-    edge_dist = dist[tail[keep], head[keep]]
+    edge_dist = geo.haversine(lon[tail[keep]], lat[tail[keep]], lon[head[keep]], lat[head[keep]])
     return edges, edge_dist
