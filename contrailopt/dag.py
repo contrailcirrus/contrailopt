@@ -1068,8 +1068,7 @@ def _neighborhood_edges(
         lon[np.newaxis, :],
         lat[np.newaxis, :],
     )
-    tail, head = np.nonzero((dist > 0.0) & (dist <= max_dist_m))
-    return tail, head
+    return np.nonzero((dist > 0.0) & (dist <= max_dist_m))
 
 
 def _dual_az_edges(
