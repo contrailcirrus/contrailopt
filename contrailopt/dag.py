@@ -1,5 +1,6 @@
 """Utilities for horizontal DAG construction."""
 
+import warnings
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
@@ -8,7 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
-from pycontrails import Flight, MetDataArray, MetDataset
+from pycontrails import MetDataArray, MetDataset
 from pycontrails.core import airports
 from pycontrails.physics import geo
 
@@ -697,67 +698,6 @@ class HorizontalDAG:
             max_dist_m=max_dist_m,
         )
 
-    @classmethod
-    def from_flight(
-        cls,
-        flight: Flight,
-        max_dist_m: float = 500_000.0,
-    ) -> Self:
-        """Build a DAG from a ``pycontrails.Flight`` trajectory.
-
-        Waypoint *i* is connected to waypoint *j* iff *j* is strictly forward
-        in time and within ``max_dist_m`` great-circle distance of *i*.
-
-        Parameters
-        ----------
-        flight : Flight
-            A flight trajectory with longitude, latitude, and time columns.
-        max_dist_m : float
-            Maximum great-circle distance in meters for an edge.
-
-        Returns
-        -------
-        HorizontalDAG
-            A DAG whose nodes are the flight waypoints, with the first
-            waypoint as origin and the last as destination.
-        """
-        lon = flight["longitude"]
-        lat = flight["latitude"]
-        time = flight["time"]
-        n = len(lon)
-
-        # Compute full 2D pairwise distance matrix, could be smarter here if needed
-        dist = geo.haversine(
-            lon[:, np.newaxis],
-            lat[:, np.newaxis],
-            lon[np.newaxis, :],
-            lat[np.newaxis, :],
-        )
-
-        dist_filt = dist <= max_dist_m
-        time_filt = time[np.newaxis, :] > time[:, np.newaxis]
-        tail, head = np.nonzero(dist_filt & time_filt)
-
-        edge_dist = dist[tail, head]
-        order = np.argsort(tail)
-        tail = tail[order]
-        head = head[order]
-        edge_dist = edge_dist[order]
-
-        adj_ptr = np.zeros(n + 1, dtype=np.int64)
-        np.add.at(adj_ptr[1:], tail, 1)
-        np.cumsum(adj_ptr, out=adj_ptr)
-
-        return cls(
-            lon=lon,
-            lat=lat,
-            adj_ptr=adj_ptr,
-            adj=head,
-            edge_dist=edge_dist,
-            h_origin=0,
-            h_dest=n - 1,
-        )
-
     def topo_wavefronts(self) -> Generator[npt.NDArray[np.int64], None, None]:
         """Yield topological wavefronts reachable from origin.
 
@@ -784,6 +724,131 @@ class HorizontalDAG:
             candidates = np.unique(neighbors)
             filt = in_degree[candidates] == 0
             wave_nodes = candidates[filt]
+
+
+@dataclass(kw_only=True, slots=True, frozen=True)
+class Track:
+    """An ordered sequence of timed waypoints along a flown path.
+
+    The flight-profile optimizer (:func:`contrailopt.optimize.solve_track`) follows a fixed
+    lateral path, so it needs only the ordered nodes, their times, and along-track distances.
+
+    This interface supplies ``lon``, ``lat``, ``node_time``, ``cum_dist``,
+    ``segment_dist``, ``n_nodes``, ``h_origin``, ``h_dest`` computed straight from
+    the coordinates, so it can often be used in place of :class:`HorizontalDAG`.
+    """
+
+    lon: npt.NDArray[np.floating]
+    lat: npt.NDArray[np.floating]
+    node_time: npt.NDArray[np.datetime64]
+
+    @property
+    def n_nodes(self) -> int:
+        """The number of waypoints."""
+        return len(self.lon)
+
+    @property
+    def h_origin(self) -> int:
+        """Index of the origin node (always the first waypoint)."""
+        return 0
+
+    @property
+    def h_dest(self) -> int:
+        """Index of the destination node (always the last waypoint)."""
+        return len(self.lon) - 1
+
+    @property
+    def segment_dist(self) -> npt.NDArray[np.floating]:
+        """Great-circle distance between consecutive waypoints ``(n - 1,)``."""
+        return geo.haversine(self.lon[:-1], self.lat[:-1], self.lon[1:], self.lat[1:])
+
+    @property
+    def cum_dist(self) -> npt.NDArray[np.floating]:
+        """Cumulative along-track distance at each waypoint ``(n,)``, starting at zero."""
+        out = np.zeros(self.n_nodes, dtype=self.lon.dtype)
+        np.cumsum(self.segment_dist, out=out[1:])
+        return out
+
+    @property
+    def crosses_antimeridian(self) -> bool:
+        """Whether the origin-to-destination span wraps the antimeridian."""
+        return abs(self.lon[0].item() - self.lon[-1].item()) > 180.0
+
+    def plot(self, ax: "GeoAxes | None" = None, linewidth: float = 2.0) -> "GeoAxes":
+        """Plot the track on a cartopy map."""
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        import matplotlib.pyplot as plt
+
+        data_crs = ccrs.Geodetic()
+        if ax is None:
+            central_lon = 180.0 if self.crosses_antimeridian else 0.0
+            proj = ccrs.PlateCarree(central_longitude=central_lon)
+            _, ax = plt.subplots(figsize=(20, 10), subplot_kw={"projection": proj})
+            ax.set_extent(
+                [
+                    self.lon.min() - 2.0,
+                    self.lon.max() + 2.0,
+                    self.lat.min() - 2.0,
+                    self.lat.max() + 2.0,
+                ],
+                crs=data_crs,
+            )
+
+        ax.add_feature(cfeature.LAND, facecolor="whitesmoke")
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor="gray")
+        ax.add_feature(cfeature.STATES, linewidth=0.2, edgecolor="gray")
+
+        ax.plot(self.lon, self.lat, color="steelblue", linewidth=linewidth, transform=data_crs)
+        ax.plot(self.lon[0], self.lat[0], "ro", markersize=8, transform=data_crs, zorder=10)
+        ax.plot(self.lon[-1], self.lat[-1], "go", markersize=8, transform=data_crs, zorder=10)
+        ax.set_title(f"{self.n_nodes} waypoints")
+        return ax
+
+
+def _warn_if_ef_present(ds: xr.Dataset) -> None:
+    """Warn if the input carries some variant of energy forcing other than 'eef_per_m'."""
+    for key in ("ef", "eef", "ef_per_m", "energy_forcing", "effective_energy_forcing"):
+        if key in ds:
+            warnings.warn(
+                f"Found '{key}' in the input dataset; it will be ignored. The solver expects "
+                "effective energy forcing per distance in J / m under the name 'eef_per_m'.",
+                stacklevel=3,
+            )
+
+
+def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
+    """Validate and format a ``(waypoint, altitude_ft)`` flight profile for the track solver.
+
+    Returns a dataset carrying the met variables under their original names
+    (``air_temperature``, ``u_wind``, ``v_wind``, and optional ``eef_per_m``),
+    each cast to float32 and oriented ``(waypoint, altitude_ft)``.
+
+    NaN in the core weather variables raises, while NaN in ``eef_per_m`` is zero-filled.
+    """
+    if ds.sizes["waypoint"] != n_nodes:
+        raise ValueError(f"ds has {ds.sizes['waypoint']} waypoints but dag has {n_nodes} nodes")
+
+    _warn_if_ef_present(ds)
+
+    for required in ("air_temperature", "u_wind", "v_wind"):
+        if required not in ds:
+            raise ValueError(f"flight profile is missing required variable '{required}'")
+
+    data_vars = {}
+    for name in ("air_temperature", "u_wind", "v_wind", "eef_per_m"):
+        if name not in ds:
+            continue
+
+        col = ds[name].transpose("waypoint", "altitude_ft").values.astype(np.float32, copy=False)
+        if name == "eef_per_m":
+            col = np.nan_to_num(col, nan=0.0)
+        elif np.isnan(col).any():
+            raise ValueError(f"NaN values found in '{name}'")
+        data_vars[name] = (("waypoint", "altitude_ft"), col)
+
+    return xr.Dataset(data_vars, coords={"altitude_ft": ds["altitude_ft"].values})
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -969,6 +1034,8 @@ class EdgeMetLookup:
         else:
             ds = met
             metdataset_init = True
+
+        _warn_if_ef_present(ds)
 
         # Ensure variables
         variables = ["air_temperature", "eastward_wind", "northward_wind"]
