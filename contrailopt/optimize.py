@@ -1781,6 +1781,15 @@ class Optimizer:
         """Compute the kg-fuel-equivalent cost per J of effective energy forcing."""
         return self.dollar_tonne_co2e / (J_PER_TONNE_CO2 * self.dollar_kg_fuel)
 
+    @property
+    def kind(self) -> str:
+        """Return the optimization variant.
+
+        Returns ``"track"`` for a fixed-path vertical-profile 2d optimizer (built via
+        :meth:`from_flight`), or ``"dag"`` for the full 4d lateral-plus-vertical DAG optimizer.
+        """
+        return "track" if self.profile_ds is not None else "dag"
+
     def __repr__(self) -> str:
         status = "solved" if self.result is not None else "unsolved"
         if self.profile_ds is not None:
