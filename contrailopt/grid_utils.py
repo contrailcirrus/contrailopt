@@ -234,7 +234,6 @@ def _select_waypoint_times(
     data_vars = {}
     for name, da in ds.items():
         v = da.transpose("sample", "altitude_ft", "time").values
-        # Advanced indices separated by a slice: result is (waypoint, altitude_ft)
         col = v[rows, :, lo] * (1.0 - w2) + v[rows, :, hi] * w2
         data_vars[name] = (("waypoint", "altitude_ft"), col)
 
