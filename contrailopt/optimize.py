@@ -159,7 +159,7 @@ def _calculate_cruise_at_samples(
     candidate FL in ``fl_choices``. Cruise performance (fuel flow, TAS, wind)
     is evaluated at each candidate FL (the destination node FL, not the source node FL),
     searching over ``mach_choices``. For step-climbs, the cruise-zone weighting zeros out the
-    climb portion so that only the candidate level-flight segment contributes to fuel and time. For
+    climb portion so that only the candidate level flight segment contributes to fuel and time. For
     step-descents, climb_dist is zero, so the full edge is treated as cruise at the candidate FL.
 
     The EEF term (``eef_per_m * delta_dist``) is accumulated over the full
@@ -786,7 +786,7 @@ def _expand_transitions(
     start: npt.NDArray[np.int64],
     end: npt.NDArray[np.int64],
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]:
-    """Expand transitions into the waypoints each spans (``end > start`` elementwise).
+    """Flatten each transition into the run of waypoints it covers, from ``start`` to ``end``.
 
     Returns ``(node, transition, bounds)``: the waypoint index of each sample, the index
     of the transition it belongs to, and per-transition offsets for ``np.add.reduceat``.
@@ -901,9 +901,9 @@ def _relax_transitions(
     eef_cost_factor: float,
     allow_cooling_credit: bool,
 ) -> None:
-    """Cruise a batch of transitions at every candidate Mach, pick the best, and relax.
+    """Cruise a batch of transitions at every candidate Mach number, pick the best, and relax.
 
-    Each transition carries a manoeuvre with known fuel/time (``fixed_fuel``/``fixed_time``:
+    Each transition carries a manoeuvre with known fuel and time (``fixed_fuel`` and ``fixed_time``:
     a climb at its start over ``lead_dist``, or a final descent at its end over
     ``trail_dist``) plus a level cruise over the rest, whose fuel and time depend on the
     Mach number choice.
@@ -1376,6 +1376,8 @@ def _prepare_dag(
     **kwargs: Any,
 ) -> HorizontalDAG | Track:
     """Return the solver's DAG, normalized to ``FLOAT_DTYPE``.
+
+    The parameter ``dag`` can be one of:
 
     - ``None``: build an airport-anchored ``HorizontalDAG`` from a Poisson-disc sampling.
     - ``HorizontalDAG``: cast to float32, check its endpoints agree with the airports, and
