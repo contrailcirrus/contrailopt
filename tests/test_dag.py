@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-from pycontrails import Flight, MetDataset
+from pycontrails import MetDataset
 
 from contrailopt import AirportCoords, EdgeMetLookup, HorizontalDAG
 
@@ -699,62 +699,6 @@ class TestDisconnectedPrune:
             h_dest=3,
         )
 
-        with pytest.raises(ValueError, match="unreachable"):
-            dag.prune_unreachable()
-
-
-class TestFromFlight:
-    @pytest.fixture
-    def sample_flight(self) -> Flight:
-        """A simple 5-waypoint eastbound flight."""
-        n = 5
-        return Flight(
-            longitude=np.linspace(-80.0, -70.0, n),
-            latitude=np.linspace(40.0, 42.0, n),
-            altitude=np.full(n, 10000.0),
-            time=pd.date_range("2024-01-01", periods=n, freq="h"),
-        )
-
-    def test_structure(self, sample_flight: Flight) -> None:
-        dag = HorizontalDAG.from_flight(sample_flight)
-        assert dag.n_nodes == 5
-        assert dag.h_origin == 0
-        assert dag.h_dest == 4
-        assert dag.n_edges == 7
-
-    def test_edges_forward_in_time(self, sample_flight: Flight) -> None:
-        dag = HorizontalDAG.from_flight(sample_flight)
-        time = sample_flight["time"]
-        edges = dag.edges
-        assert np.all(time[edges[:, 1]] > time[edges[:, 0]])
-
-    def test_edges_within_max_dist(self, sample_flight: Flight) -> None:
-        dag = HorizontalDAG.from_flight(sample_flight, max_dist_m=300_000.0)
-        assert np.all(dag.edge_dist <= 300_000.0)
-        assert np.all(dag.edge_dist > 0.0)
-
-    def test_small_max_dist_reduces_edges(self, sample_flight: Flight) -> None:
-        big = HorizontalDAG.from_flight(sample_flight, max_dist_m=1_000_000.0)
-        small = HorizontalDAG.from_flight(sample_flight, max_dist_m=300_000.0)
-        assert small.n_edges < big.n_edges
-
-    def test_sequential_edges_present(self, sample_flight: Flight) -> None:
-        # consecutive waypoints connected (if max_dist allows)
-        dag = HorizontalDAG.from_flight(sample_flight)
-        adj = dag.adjacency_matrix()
-        for i in range(dag.n_nodes - 1):
-            assert adj[i, i + 1]
-
-    def test_prune_preserves_all(self, sample_flight: Flight) -> None:
-        dag = HorizontalDAG.from_flight(sample_flight)  # this fails if max_dist_m too small
-        pruned = dag.prune_unreachable()
-        assert pruned.n_nodes == dag.n_nodes
-
-    def test_small_max_dist_disconnects(self, sample_flight: Flight) -> None:
-        dag = HorizontalDAG.from_flight(sample_flight, max_dist_m=1.0)
-        assert dag.n_edges == 0
-
-        # Calling prune raises since dest is unreachable
         with pytest.raises(ValueError, match="unreachable"):
             dag.prune_unreachable()
 

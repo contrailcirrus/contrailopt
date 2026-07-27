@@ -1,4 +1,4 @@
-"""Trajectory optimization with PS lookups on a horizontal DAG."""
+"""Trajectory optimization with Poll-Schumann Aircraft Performance and climate term."""
 
 import itertools
 from collections.abc import Callable
@@ -15,7 +15,14 @@ from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.physics import geo, jet, units
 
 from contrailopt import ps, slerp
-from contrailopt.dag import AirportCoords, EdgeMetLookup, HorizontalDAG
+from contrailopt.dag import (
+    AirportCoords,
+    EdgeMetLookup,
+    HorizontalDAG,
+    Track,
+    validate_flight_profile,
+)
+from contrailopt.grid_utils import flight_profile_from_met
 
 if TYPE_CHECKING:
     from cartopy.mpl.geoaxes import GeoAxes
@@ -78,9 +85,6 @@ def _estimate_sample_times(
     mach_choices: npt.NDArray[FLOAT_DTYPE],
 ) -> npt.NDArray[np.datetime64]:
     """Estimate arrival datetime64 at each sample point per FL.
-
-    Uses per-FL climb time and ISA-based TAS at each FL to approximate how
-    long it takes the aircraft to reach each sample along the edge.
 
     Returns shape ``(n_sample, n_fl)``.
     """
@@ -153,10 +157,10 @@ def _calculate_cruise_at_samples(
 
     Met data is interpolated at each sample point along the edge for every
     candidate FL in ``fl_choices``. Cruise performance (fuel flow, TAS, wind)
-    is evaluated at each candidate FL (the destination node FL, not the source node FL).
-    For step-climbs, the cruise-zone weighting zeros out the climb portion so that only the
-    level-flight segment contributes to fuel and time. For step-descents, climb_dist is
-    zero, so the full edge is treated as cruise at the candidate FL.
+    is evaluated at each candidate FL (the destination node FL, not the source node FL),
+    searching over ``mach_choices``. For step-climbs, the cruise-zone weighting zeros out the
+    climb portion so that only the candidate level-flight segment contributes to fuel and time. For
+    step-descents, climb_dist is zero, so the full edge is treated as cruise at the candidate FL.
 
     The EEF term (``eef_per_m * delta_dist``) is accumulated over the full
     edge without cruise-zone weighting because we want contrail forcing to apply
@@ -219,27 +223,12 @@ def _calculate_cruise_at_samples(
     )
     sample_met = met_lookup(sample_idxs, sample_dt)
 
-    # Cruise performance at each (sample, FL, Mach)
     air_temp_3d = sample_met.air_temperature[:, :, np.newaxis]
     mass_3d = post_climb_mass[sample_to_edge][:, :, np.newaxis]
-    ff, feas = ps.cruise_performance(
-        fl_choices[np.newaxis, :, np.newaxis],
-        mach_choices[np.newaxis, np.newaxis, :],
-        mass_3d,
-        air_temp_3d,
-        atyp,
-    )
-    tas = units.mach_number_to_tas(mach_choices[np.newaxis, np.newaxis, :], air_temp_3d)
 
-    # Along-track ground speed
-    az = met_lookup.sample_azimuth[sample_idxs][:, np.newaxis]  # (n_sample, 1)
+    # Along-track wind component
+    az = met_lookup.sample_azimuth[sample_idxs][:, np.newaxis]
     tailwind = sample_met.eastward_wind * np.sin(az) + sample_met.northward_wind * np.cos(az)
-    ground_speed = tas + tailwind[:, :, np.newaxis]  # (n_sample, n_fl, n_mach)
-
-    # Negative ground_speed could be handled gracefully with the feasible mask, but it's not
-    # realistic and probably indicates an actual problem with the input
-    if np.any(ground_speed < 0.0):
-        raise RuntimeError("Negative ground speed: headwind exceeds TAS at some sample point")
 
     # Weight by cruise-zone overlap, then reduce to per-edge totals
     weight = _cruise_zone_weights(
@@ -251,6 +240,26 @@ def _calculate_cruise_at_samples(
         flat_dist,
     )
     seg_dist = met_lookup.delta_dist[sample_idxs]
+
+    # Cruise performance at each (sample, FL, Mach)
+    with np.errstate(over="ignore", invalid="ignore"):
+        # Ignore numpy errors at infeasible points
+        ff, feas = ps.cruise_performance(
+            fl_choices[np.newaxis, :, np.newaxis],
+            mach_choices[np.newaxis, np.newaxis, :],
+            mass_3d,
+            air_temp_3d,
+            atyp,
+        )
+
+    tas = units.mach_number_to_tas(mach_choices[np.newaxis, np.newaxis, :], air_temp_3d)
+    ground_speed = tas + tailwind[:, :, np.newaxis]  # (n_sample, n_fl, n_mach)
+
+    # Negative ground_speed could be handled gracefully with the feasible mask, but it's not
+    # realistic and probably indicates an actual problem with the input
+    if np.any(ground_speed < 0.0):
+        raise RuntimeError("Negative ground speed: headwind exceeds TAS at some sample point")
+
     seg_time = seg_dist[:, np.newaxis, np.newaxis] / ground_speed * weight[:, :, np.newaxis]
     seg_fuel = ff * seg_time
 
@@ -490,16 +499,20 @@ def _isa_cruise(
 ) -> tuple[npt.NDArray[FLOAT_DTYPE], npt.NDArray[FLOAT_DTYPE], npt.NDArray[np.bool_]]:
     """Compute cruise fuel, time, and feasibility using ISA temperatures (no met)."""
     fl_3d = fl_choices[np.newaxis, :, np.newaxis]
-    mach_3d = mach_choices[np.newaxis, np.newaxis, :]
     air_temperature_3d = units.m_to_T_isa(units.ft_to_m(fl_3d))
     mass_3d = edge_mass[:, :, np.newaxis]
-    ff, cruise_feasible = ps.cruise_performance(
-        fl_3d,
-        mach_3d,
-        mass_3d,
-        air_temperature_3d,
-        atyp,
-    )
+
+    mach_3d = mach_choices[np.newaxis, np.newaxis, :]
+    with np.errstate(over="ignore", invalid="ignore"):
+        # Ignore numpy errors at infeasible points
+        ff, cruise_feasible = ps.cruise_performance(
+            fl_3d,
+            mach_3d,
+            mass_3d,
+            air_temperature_3d,
+            atyp,
+        )
+
     tas = units.mach_number_to_tas(mach_3d, air_temperature_3d)
     cruise_time = cruise_dist[:, :, np.newaxis] / tas
     cruise_fuel = ff * cruise_time
@@ -743,6 +756,470 @@ def solve_dag(
     return state
 
 
+@dataclass(kw_only=True, slots=True, frozen=True)
+class _ProfileArrays:
+    """Numpy arrays backing the track solver: met per (waypoint, FL) plus track geometry."""
+
+    air_temperature: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
+    u_wind: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
+    v_wind: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
+    eef_per_m: npt.NDArray[FLOAT_DTYPE] | None  # (n_wp, n_fl)
+    cum_dist: npt.NDArray[FLOAT_DTYPE]  # (n_wp,) along-track distance at each waypoint
+    seg_dist: npt.NDArray[FLOAT_DTYPE]  # (n_wp - 1,) waypoint-to-waypoint distance
+    seg_azimuth: npt.NDArray[FLOAT_DTYPE]  # (n_wp - 1,) radians
+
+    @classmethod
+    def build(cls, dag: HorizontalDAG | Track, profile: xr.Dataset) -> Self:
+        lon, lat = dag.lon, dag.lat
+        return cls(
+            air_temperature=profile["air_temperature"].values,
+            u_wind=profile["u_wind"].values,
+            v_wind=profile["v_wind"].values,
+            eef_per_m=profile["eef_per_m"].values if "eef_per_m" in profile else None,
+            cum_dist=dag.cum_dist,
+            seg_dist=dag.segment_dist,
+            seg_azimuth=np.deg2rad(geo.azimuth(lon[:-1], lat[:-1], lon[1:], lat[1:])),
+        )
+
+
+def _expand_transitions(
+    start: npt.NDArray[np.int64],
+    end: npt.NDArray[np.int64],
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    """Expand transitions into the waypoints each spans (``end > start`` elementwise).
+
+    Returns ``(node, transition, bounds)``: the waypoint index of each sample, the index
+    of the transition it belongs to, and per-transition offsets for ``np.add.reduceat``.
+    """
+    n_samp = (end - start) + 1
+    bounds = np.zeros(len(start) + 1, dtype=np.int64)
+    np.cumsum(n_samp, out=bounds[1:])
+    transition = np.repeat(np.arange(len(start), dtype=np.int64), n_samp)
+    offset = np.arange(bounds[-1], dtype=np.int64) - np.repeat(bounds[:-1], n_samp)
+    node = np.repeat(start, n_samp) + offset
+    return node, transition, bounds[:-1]
+
+
+def _track_cruise(
+    pa: _ProfileArrays,
+    start: npt.NDArray[np.int64],
+    arrival: npt.NDArray[np.int64],
+    fl_idx: npt.NDArray[np.int64],
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    mach_choices: npt.NDArray[FLOAT_DTYPE],
+    mass: npt.NDArray[FLOAT_DTYPE],
+    lead_dist: npt.NDArray[FLOAT_DTYPE],
+    trail_dist: npt.NDArray[FLOAT_DTYPE],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+) -> tuple[
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[np.bool_],
+]:
+    """Integrate level cruise for a batch of transitions at every candidate Mach."""
+    node, tr, bounds = _expand_transitions(start, arrival)
+    fli = fl_idx[tr]
+
+    # Each sample integrates the segment leaving its node
+    # The arrival node has no next segment, so length 0
+    safe = np.minimum(node, len(pa.seg_dist) - 1)
+    is_last = node == arrival[tr]
+    delta = np.where(is_last, 0.0, pa.seg_dist[safe])
+    azimuth = pa.seg_azimuth[safe].copy()
+    prev = np.maximum(np.arange(len(node), dtype=np.int64) - 1, 0)
+    azimuth[is_last] = azimuth[prev][is_last]
+
+    temperature = pa.air_temperature[node, fli]
+    tailwind = pa.u_wind[node, fli] * np.sin(azimuth) + pa.v_wind[node, fli] * np.cos(azimuth)
+
+    # Fraction of each sample's segment lying in the cruise zone
+    span = pa.cum_dist[arrival] - pa.cum_dist[start]
+    x_lo = pa.cum_dist[node] - pa.cum_dist[start[tr]]
+    overlap = np.clip(
+        np.minimum(x_lo + delta, (span - trail_dist)[tr]) - np.maximum(x_lo, lead_dist[tr]),
+        0.0,
+        None,
+    )
+    weight = np.divide(overlap, delta, out=np.zeros_like(delta), where=delta > 0.0)
+
+    # Cruise performance at each (sample, Mach)
+    tas = units.mach_number_to_tas(mach_choices[np.newaxis, :], temperature[:, np.newaxis])
+    ground_speed = tas + tailwind[:, np.newaxis]
+    with np.errstate(over="ignore", invalid="ignore"):
+        ff, feas = ps.cruise_performance(
+            fl_choices[fli][:, np.newaxis],
+            mach_choices[np.newaxis, :],
+            mass[tr][:, np.newaxis],
+            temperature[:, np.newaxis],
+            atyp,
+        )
+    feas = feas & (ground_speed > 0.0)
+
+    seg_time = np.divide(
+        (delta * weight)[:, np.newaxis],
+        ground_speed,
+        out=np.zeros_like(ground_speed),
+        where=ground_speed > 0.0,
+    )
+    cruise_time = np.add.reduceat(seg_time, bounds, axis=0)
+    cruise_fuel = np.add.reduceat(ff * seg_time, bounds, axis=0)
+    feasible = np.add.reduceat(~feas, bounds, axis=0) == 0
+
+    # The climb must fit within the available span, or the transition can't complete (1 m buffer)
+    feasible &= (lead_dist + trail_dist <= span + 1.0)[:, np.newaxis]
+
+    if pa.eef_per_m is None:
+        eef = np.zeros(len(start), dtype=FLOAT_DTYPE)
+    else:
+        eef = np.add.reduceat(pa.eef_per_m[node, fli] * delta, bounds)
+
+    return cruise_fuel, cruise_time, eef, feasible
+
+
+def _relax_transitions(
+    pa: _ProfileArrays,
+    state: DAGState,
+    h: int,
+    arrival: npt.NDArray[np.int64],
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    mach_choices: npt.NDArray[FLOAT_DTYPE],
+    target_fi: npt.NDArray[np.int64],
+    arrival_fi: npt.NDArray[np.int64],
+    src_fi: npt.NDArray[np.int64],
+    src_cost: npt.NDArray[FLOAT_DTYPE],
+    src_elapsed: npt.NDArray[FLOAT_DTYPE],
+    lead_dist: npt.NDArray[FLOAT_DTYPE],
+    trail_dist: npt.NDArray[FLOAT_DTYPE],
+    fixed_fuel: npt.NDArray[FLOAT_DTYPE],
+    fixed_time: npt.NDArray[FLOAT_DTYPE],
+    cruise_mass: npt.NDArray[FLOAT_DTYPE],
+    post_mass: npt.NDArray[FLOAT_DTYPE],
+    feasible: npt.NDArray[np.bool_],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    cost_index: float,
+    eef_cost_factor: float,
+    allow_cooling_credit: bool,
+) -> None:
+    """Cruise a batch of transitions at every candidate Mach, pick the best, and relax.
+
+    Each transition carries a manoeuvre with known fuel/time (``fixed_fuel``/``fixed_time``:
+    a climb at its start over ``lead_dist``, or a final descent at its end over
+    ``trail_dist``) plus a level cruise over the rest, whose fuel and time depend on the
+    Mach number choice.
+    """
+    n = len(target_fi)
+    cruise_fuel, cruise_time, eef, feasible_m = _track_cruise(
+        pa,
+        np.full(n, h, dtype=np.int64),
+        arrival,
+        target_fi,
+        fl_choices,
+        mach_choices,
+        cruise_mass,
+        lead_dist,
+        trail_dist,
+        atyp,
+    )
+
+    mach_cost = cost_index / 60.0 * cruise_time + cruise_fuel
+    mach_cost = np.where(feasible_m, mach_cost, np.inf)
+    best_m = np.argmin(mach_cost, axis=1)
+
+    def _take(a: npt.NDArray) -> npt.NDArray:
+        return np.take_along_axis(a, best_m[:, np.newaxis], axis=1)[:, 0]
+
+    best_cruise_fuel = _take(cruise_fuel)
+    best_cruise_time = _take(cruise_time)
+
+    _relax_track_batch(
+        state,
+        arrival,
+        arrival_fi,
+        src_cost,
+        h,
+        src_fi,
+        fixed_fuel + best_cruise_fuel,
+        fixed_time + best_cruise_time,
+        src_elapsed,
+        post_mass - best_cruise_fuel,
+        eef,
+        feasible & np.isfinite(_take(mach_cost)),
+        mach_choices[best_m],
+        lead_dist,
+        fixed_time,
+        cost_index,
+        eef_cost_factor,
+        allow_cooling_credit,
+    )
+
+
+def solve_track(
+    dag: HorizontalDAG | Track,
+    profile: xr.Dataset,
+    amass_init: float,
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    mach_choices: npt.NDArray[FLOAT_DTYPE],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    cost_index: float,
+    eef_cost_factor: float,
+    origin_elev_ft: float,
+    dest_elev_ft: float,
+    allow_cooling_credit: bool,
+) -> DAGState:
+    """Solve the vertical profile along a fixed track, choosing the flight level and Mach number.
+
+    Unlike :func:`solve_dag`, there is no precomputed edge set. From a given state, each action
+    determines how far the aircraft advances: a level cruise (target FL equal to or below
+    the current one) moves one waypoint; a climb moves as far as the climb model's own
+    distance requires, then cruises the remainder of that segment to the next waypoint.
+    """
+    fl_choices = fl_choices.astype(FLOAT_DTYPE, copy=False)
+    mach_choices = mach_choices.astype(FLOAT_DTYPE, copy=False)
+    pa = _ProfileArrays.build(dag, profile)
+
+    n_h = dag.n_nodes
+    n_fl = len(fl_choices)
+    ground_fi = n_fl
+    state = DAGState.initialize(n_h, n_fl + 1)
+
+    cum = pa.cum_dist
+    h_dest = dag.h_dest
+
+    fd_dist, fd_fuel, fd_time = ps.final_descent(fl_choices, dest_elev_ft, atyp)
+
+    # For each flight level, compute the node at which the final descent has to begin
+    tod_node = np.clip(np.searchsorted(cum, cum[h_dest] - fd_dist, side="right") - 1, 0, h_dest - 1)
+
+    state.best_cost[dag.h_origin, ground_fi] = 0.0
+    state.best_mass[dag.h_origin, ground_fi] = amass_init
+    state.best_time[dag.h_origin, ground_fi] = 0.0
+
+    all_fl = np.arange(n_fl, dtype=np.int64)
+
+    for h in range(h_dest):
+        active = np.flatnonzero(np.isfinite(state.best_cost[h]))
+        if not active.size:
+            continue
+
+        if h == dag.h_origin:
+            # Nothing can transition backward into the ground slot, so it is always the
+            # only active state at the origin
+            src_mass = FLOAT_DTYPE(state.best_mass[h, ground_fi])
+            # Real along-track wind and temperature at the origin, lowest FL (as in solve_dag)
+            az0 = pa.seg_azimuth[h].item()
+            tw0 = pa.u_wind[h, 0] * np.sin(az0) + pa.v_wind[h, 0] * np.cos(az0)
+            disa0 = pa.air_temperature[h, 0] - units.m_to_T_isa(units.ft_to_m(fl_choices[0]))
+            climb_dist, climb_fuel, climb_time, post_mass, feasible = _compute_ground_climbs(
+                fl_choices,
+                src_mass,
+                atyp,
+                origin_elev_ft,
+                np.array([[disa0]], dtype=FLOAT_DTYPE),
+                np.array([[tw0]], dtype=FLOAT_DTYPE),
+            )
+            climb_dist, climb_fuel = climb_dist[0], climb_fuel[0]
+            climb_time, post_mass, feasible = climb_time[0], post_mass[0], feasible[0]
+
+            arrival = np.clip(
+                np.searchsorted(cum, cum[h] + climb_dist, side="left"), h + 1, n_h - 1
+            )
+            _relax_transitions(
+                pa,
+                state,
+                h,
+                arrival,
+                fl_choices,
+                mach_choices,
+                target_fi=all_fl,
+                arrival_fi=all_fl,
+                src_fi=np.full(n_fl, ground_fi, dtype=np.int64),
+                src_cost=np.full(n_fl, state.best_cost[h, ground_fi], dtype=FLOAT_DTYPE),
+                src_elapsed=np.full(n_fl, state.best_time[h, ground_fi], dtype=FLOAT_DTYPE),
+                lead_dist=climb_dist,
+                trail_dist=np.zeros(n_fl, dtype=FLOAT_DTYPE),
+                fixed_fuel=climb_fuel,
+                fixed_time=climb_time,
+                cruise_mass=post_mass,
+                post_mass=post_mass,
+                feasible=feasible,
+                atyp=atyp,
+                cost_index=cost_index,
+                eef_cost_factor=eef_cost_factor,
+                allow_cooling_credit=allow_cooling_credit,
+            )
+            continue
+
+        n_active = len(active)
+        src_fl_active = fl_choices[active]
+        src_mass_active = state.best_mass[h, active]
+        src_cost_active = state.best_cost[h, active]
+        src_elapsed_active = state.best_time[h, active]
+
+        # Every active source against every candidate target FL, flattened row-major
+        # (source varies slowest). Same-FL targets are the plain cruise action: the climb
+        # model returns zero distance/time/fuel for them, so they advance exactly one
+        # waypoint through the searchsorted below. Step-downs likewise cost nothing here
+        # and are always feasible, as in solve_dag; without them the aircraft could climb
+        # to a level it cannot sustain as fuel burns off and have no way back down.
+        src_fl_2d = np.repeat(src_fl_active, n_fl)
+        tgt_fl_2d = np.tile(fl_choices, n_active)
+        mass_2d = np.repeat(src_mass_active, n_fl)
+
+        # The climb must see the same along-track wind and temperature the cruise does,
+        # evaluated at the source node and source FL. Passing zero wind here (as an earlier
+        # version did) makes climbs cover ground at design-Mach TAS while cruise pays the
+        # real headwind, so the solver treats climbing as a faster way down the track and
+        # weaves to exploit it.
+        az_h = pa.seg_azimuth[min(h, len(pa.seg_azimuth) - 1)].item()
+        tw_src = pa.u_wind[h, active] * np.sin(az_h) + pa.v_wind[h, active] * np.cos(az_h)
+        disa_src = pa.air_temperature[h, active] - units.m_to_T_isa(units.ft_to_m(src_fl_active))
+
+        climb_dist, climb_fuel, climb_time, post_mass, feasible = ps.compute_climb_segment(
+            src_fl_2d,
+            tgt_fl_2d,
+            mass_2d,
+            atyp,
+            delta_isa=np.repeat(disa_src, n_fl),
+            tailwind=np.repeat(tw_src, n_fl),
+        )
+        feasible = feasible | (tgt_fl_2d <= src_fl_2d)
+
+        arrival = np.clip(np.searchsorted(cum, cum[h] + climb_dist, side="left"), h + 1, n_h - 1)
+        _relax_transitions(
+            pa,
+            state,
+            h,
+            arrival,
+            fl_choices,
+            mach_choices,
+            target_fi=np.tile(all_fl, n_active),
+            arrival_fi=np.tile(all_fl, n_active),
+            src_fi=np.repeat(active, n_fl),
+            src_cost=np.repeat(src_cost_active, n_fl),
+            src_elapsed=np.repeat(src_elapsed_active, n_fl),
+            lead_dist=climb_dist,
+            trail_dist=np.zeros(n_active * n_fl, dtype=FLOAT_DTYPE),
+            fixed_fuel=climb_fuel,
+            fixed_time=climb_time,
+            cruise_mass=post_mass,
+            post_mass=post_mass,
+            feasible=feasible,
+            atyp=atyp,
+            cost_index=cost_index,
+            eef_cost_factor=eef_cost_factor,
+            allow_cooling_credit=allow_cooling_credit,
+        )
+
+        # Final descent: the subset of active sources at their FL's top-of-descent node
+        at_tod = tod_node[active] == h
+        if at_tod.any():
+            act_d = active[at_tod]
+            n_d = len(act_d)
+            _relax_transitions(
+                pa,
+                state,
+                h,
+                np.full(n_d, h_dest, dtype=np.int64),
+                fl_choices,
+                mach_choices,
+                target_fi=act_d,
+                arrival_fi=np.full(n_d, ground_fi, dtype=np.int64),
+                src_fi=act_d,
+                src_cost=src_cost_active[at_tod],
+                src_elapsed=src_elapsed_active[at_tod],
+                lead_dist=np.zeros(n_d, dtype=FLOAT_DTYPE),
+                trail_dist=fd_dist[act_d],
+                fixed_fuel=fd_fuel[act_d],
+                fixed_time=fd_time[act_d],
+                cruise_mass=src_mass_active[at_tod],
+                post_mass=src_mass_active[at_tod] - fd_fuel[act_d],
+                feasible=np.ones(n_d, dtype=bool),
+                atyp=atyp,
+                cost_index=cost_index,
+                eef_cost_factor=eef_cost_factor,
+                allow_cooling_credit=allow_cooling_credit,
+            )
+
+    # The descent lands in the destination's ground slot. Mirror it into the cruise column
+    # it descended from, which is where reconstruct_path starts its walk back.
+    prev_fi = state.best_prev_fi[h_dest, ground_fi].item()
+    if prev_fi >= 0:
+        for arr in (
+            state.best_cost,
+            state.best_mass,
+            state.best_time,
+            state.best_mach,
+            state.best_climb_dist,
+            state.best_climb_time,
+            state.best_prev_h,
+            state.best_prev_fi,
+        ):
+            arr[h_dest, prev_fi] = arr[h_dest, ground_fi]
+
+    return state
+
+
+def _relax_track_batch(
+    state: DAGState,
+    arrival: npt.NDArray[np.int64],
+    arrival_fi: npt.NDArray[np.int64],
+    src_cost: npt.NDArray[FLOAT_DTYPE],
+    src_h: int,
+    src_fi: npt.NDArray[np.int64],
+    fuel: npt.NDArray[FLOAT_DTYPE],
+    duration: npt.NDArray[FLOAT_DTYPE],
+    src_elapsed: npt.NDArray[FLOAT_DTYPE],
+    arrival_mass: npt.NDArray[FLOAT_DTYPE],
+    eef: npt.NDArray[FLOAT_DTYPE],
+    feasible: npt.NDArray[np.bool_],
+    mach: npt.NDArray[FLOAT_DTYPE],
+    climb_dist: npt.NDArray[FLOAT_DTYPE],
+    climb_time: npt.NDArray[FLOAT_DTYPE],
+    cost_index: float,
+    eef_cost_factor: float,
+    allow_cooling_credit: bool,
+) -> None:
+    """Write a batch of candidate transitions into ``state`` via a scatter-min.
+
+    Unlike a plain "compare current best, assign if better", this function is safe when multiple
+    candidates in the SAME call converge on the same ``(arrival, arrival_fi)`` slot (e.g.,
+    two different source flight levels whose climbs happen to land on the same waypoint and
+    target level). This mirrors ``np.minimum.at`` within ``_relax_wavefront``.
+    """
+    priced_eef = eef if allow_cooling_credit else np.maximum(eef, 0.0)
+    total = (
+        src_cost
+        + cost_index / 60.0 * duration
+        + fuel
+        + eef_cost_factor * priced_eef
+        + JetA.ei_co2 * _J_PER_KG_CO2 * eef_cost_factor * fuel
+    )
+    total = np.where(feasible, total, np.inf)
+
+    # Determining the winners can fail if the dtypes are different, so idiot check first
+    if state.best_cost.dtype != total.dtype:
+        raise RuntimeError(
+            f"Dtype mismatch: state.best_cost is {state.best_cost.dtype}, "
+            f"but total is {total.dtype}"
+        )
+    np.minimum.at(state.best_cost, (arrival, arrival_fi), total)
+
+    winners = np.isfinite(total) & (total == state.best_cost[arrival, arrival_fi])
+    if not winners.any():
+        return
+
+    idx = np.flatnonzero(winners)  # theoretically ties could happen, so the last gets chosen
+    a, g = arrival[idx], arrival_fi[idx]
+    state.best_mass[a, g] = arrival_mass[idx]
+    state.best_time[a, g] = src_elapsed[idx] + duration[idx]
+    state.best_mach[a, g] = mach[idx]
+    state.best_climb_dist[a, g] = climb_dist[idx]
+    state.best_climb_time[a, g] = climb_time[idx]
+    state.best_prev_h[a, g] = src_h
+    state.best_prev_fi[a, g] = src_fi[idx]
+
+
 def estimate_flight_hours(
     origin: AirportCoords,
     dest: AirportCoords,
@@ -882,41 +1359,40 @@ def cruise_flight_levels(
     return _fl_choices(origin, dest)
 
 
-def _build_dag(
+def _nearest_airport(lon: float, lat: float, which: str) -> str:
+    """Find the ICAO code of the airport nearest a waypoint, or raise if none is found."""
+    airports_df = airports.global_airport_database()
+    airport_icao = airports.find_nearest_airport(airports_df, lon, lat, altitude=0.0)
+    if airport_icao is None:
+        raise ValueError(f"No airport found near flight {which}")
+    return airport_icao
+
+
+def _prepare_dag(
     origin: AirportCoords,
     dest: AirportCoords,
-    dag: HorizontalDAG | None,
+    dag: HorizontalDAG | Track | None,
     avoidance_regions: list[list[tuple[float, float]]] | None,
     **kwargs: Any,
-) -> HorizontalDAG:
-    """Validate or build a DAG, then apply avoidance regions."""
-    if dag is not None:
-        # A custom DAG can have different dtypes; adjust here
-        dag = HorizontalDAG(
+) -> HorizontalDAG | Track:
+    """Return the solver's DAG, normalized to ``FLOAT_DTYPE``.
+
+    - ``None``: build an airport-anchored ``HorizontalDAG`` from a Poisson-disc sampling.
+    - ``HorizontalDAG``: cast to float32, check its endpoints agree with the airports, and
+      apply avoidance regions.
+    - ``Track``: a fixed cruise sub-track with mid-air endpoints; cast to float32 only. The
+      airport-agreement check and avoidance regions do not apply to it.
+    """
+    if isinstance(dag, Track):
+        if avoidance_regions:
+            raise ValueError("avoidance_regions are not supported for a Track")
+        return Track(
             lon=dag.lon.astype(FLOAT_DTYPE, copy=False),
             lat=dag.lat.astype(FLOAT_DTYPE, copy=False),
-            edge_dist=dag.edge_dist.astype(FLOAT_DTYPE, copy=False),
-            h_origin=dag.h_origin,
-            h_dest=dag.h_dest,
-            adj_ptr=dag.adj_ptr,
-            adj=dag.adj,
+            node_time=dag.node_time,
         )
 
-        lon0 = dag.lon[dag.h_origin]
-        lat0 = dag.lat[dag.h_origin]
-        if geo.haversine(lon0, lat0, origin.longitude, origin.latitude) > 10_000.0:  # 10 km
-            raise ValueError(
-                f"DAG origin ({lon0}, {lat0}) does not agree with "
-                f"airport {origin.icao_code} ({origin.longitude}, {origin.latitude})"
-            )
-        lon1 = dag.lon[dag.h_dest]
-        lat1 = dag.lat[dag.h_dest]
-        if geo.haversine(lon1, lat1, dest.longitude, dest.latitude) > 10_000.0:  # 10 km
-            raise ValueError(
-                f"DAG dest ({lon1}, {lat1}) does not agree with "
-                f"airport {dest.icao_code} ({dest.longitude}, {dest.latitude})"
-            )
-    else:
+    if dag is None:
         dag = (
             HorizontalDAG.from_poisson(
                 *origin.coords,
@@ -927,11 +1403,43 @@ def _build_dag(
             .prune_edges(degree=8)  # could expose, but user can also pass a custom dag directly
             .prune_unreachable()
         )
+    else:
+        # A custom DAG can have different dtypes; normalize here
+        dag = HorizontalDAG(
+            lon=dag.lon.astype(FLOAT_DTYPE, copy=False),
+            lat=dag.lat.astype(FLOAT_DTYPE, copy=False),
+            edge_dist=dag.edge_dist.astype(FLOAT_DTYPE, copy=False),
+            h_origin=dag.h_origin,
+            h_dest=dag.h_dest,
+            adj_ptr=dag.adj_ptr,
+            adj=dag.adj,
+        )
+        _check_airport_agreement(dag, origin, dest)
 
     if avoidance_regions:
         dag = dag.exclude_polygons(avoidance_regions)
 
     return dag
+
+
+def _check_airport_agreement(
+    dag: HorizontalDAG, origin: AirportCoords, dest: AirportCoords
+) -> None:
+    """Raise if the DAG's origin/destination nodes don't sit at the airports (within 10 km)."""
+    lon0 = dag.lon[dag.h_origin]
+    lat0 = dag.lat[dag.h_origin]
+    if geo.haversine(lon0, lat0, origin.longitude, origin.latitude) > 10_000.0:  # 10 km
+        raise ValueError(
+            f"DAG origin ({lon0}, {lat0}) does not agree with "
+            f"airport {origin.icao_code} ({origin.longitude}, {origin.latitude})"
+        )
+    lon1 = dag.lon[dag.h_dest]
+    lat1 = dag.lat[dag.h_dest]
+    if geo.haversine(lon1, lat1, dest.longitude, dest.latitude) > 10_000.0:  # 10 km
+        raise ValueError(
+            f"DAG dest ({lon1}, {lat1}) does not agree with "
+            f"airport {dest.icao_code} ({dest.longitude}, {dest.latitude})"
+        )
 
 
 class Optimizer:
@@ -1000,7 +1508,7 @@ class Optimizer:
         *,
         met: MetDataset | xr.Dataset | None = None,
         eef: xr.DataArray | MetDataArray | None = None,
-        dag: HorizontalDAG | None = None,
+        dag: HorizontalDAG | Track | None = None,
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
@@ -1008,6 +1516,7 @@ class Optimizer:
         flight_hours: int | None = None,
         allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
+        fl_choices: npt.NDArray[FLOAT_DTYPE] | None = None,
         **kwargs: Any,
     ) -> None:
         self.origin = (
@@ -1034,10 +1543,18 @@ class Optimizer:
                     " when dollar_tonne_co2e is set"
                 )
 
-        self.dag = _build_dag(self.origin, self.dest, dag, avoidance_regions, **kwargs)
+        self.dag = _prepare_dag(
+            self.origin,
+            self.dest,
+            dag,
+            avoidance_regions,
+            **kwargs,
+        )
         self.avoidance_regions = avoidance_regions
 
-        self.fl_choices = cruise_flight_levels(origin_icao, dest_icao)
+        self.fl_choices = (
+            fl_choices if fl_choices is not None else cruise_flight_levels(origin_icao, dest_icao)
+        )
         self.mach_choices = _mach_choices(self.atyp)
 
         if met is not None:
@@ -1056,72 +1573,206 @@ class Optimizer:
         else:
             self.met_lookup = None
 
+        # Set by from_flight: a validated (waypoint, altitude_ft) profile. When present,
+        # solve() dispatches to solve_track instead of solve_dag.
+        self.profile_ds: xr.Dataset | None = None
+
+        # Set by from_flight(use_flown_climb_descent=True): the flown climb/descent below the
+        # hand-off (lowest candidate FL) are taken as-is and only the cruise is optimized. When
+        # set, solve_track starts/ends at ``cruise_elev_ft`` (the hand-off), the DP's initial
+        # mass is reduced by the flown climb fuel, and to_flight splices the flown segments back.
+        self.cruise_elev_ft: float | None = None
+        self.prepend_flown: dict[str, npt.NDArray] | None = None
+        self.append_flown: dict[str, npt.NDArray] | None = None
+
         self.result: DAGResult | None = None
 
     @classmethod
     def from_flight(
         cls,
         flight: Flight,
-        origin_icao: str | None = None,
-        dest_icao: str | None = None,
-        aircraft_type: str | None = None,
         *,
         met: MetDataset | xr.Dataset | None = None,
+        fl_profile: xr.Dataset | None = None,
+        aircraft_type: str | None = None,
+        origin_icao: str | None = None,
+        dest_icao: str | None = None,
         eef: xr.DataArray | MetDataArray | None = None,
+        altitude_ft: npt.NDArray[np.floating] | None = None,
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
-        met_spacing_m: float = 20_000.0,
-        max_dist_m: float = 500_000.0,
         allow_cooling_credit: bool = False,
+        use_flown_climb_descent: bool = False,
     ) -> Self:
-        """Build a vertical-only optimizer from a ``pycontrails.Flight`` trajectory."""
+        """Build a vertical-profile optimizer from a ``pycontrails.Flight`` trajectory.
+
+        The optimized flight follows the flight's lateral path exactly, choosing flight level
+        and Mach number along it via :func:`solve_track`. Weather comes from one of two
+        sources:
+
+        - ``met``: raw gridded 4D met, used to interpolate the flight's waypoints at each
+          candidate flight level.
+        - ``fl_profile``: an already-interpolated ``(waypoint, altitude_ft)`` dataset carrying
+          ``air_temperature``, ``u_wind``, ``v_wind``, and optionally ``eef_per_m``, aligned
+          waypoint-for-waypoint with ``flight``.
+
+        Parameters
+        ----------
+        flight : Flight
+            Trajectory supplying the lateral path, schedule, and (for ``use_flown_climb_descent``)
+            the flown altitude profile.
+        met : MetDataset or xr.Dataset or None
+            Gridded met to interpolate. Mutually exclusive with ``fl_profile``.
+        fl_profile : xr.Dataset or None
+            Pre-interpolated per-waypoint met columns. Mutually exclusive with ``met``.
+        aircraft_type : str or None
+            PS model key. If *None*, taken from ``flight.attrs``.
+        origin_icao, dest_icao : str or None
+            ICAO codes. If *None*, taken from ``flight.attrs``, else the nearest airport.
+        eef : xr.DataArray or MetDataArray or None
+            Effective energy forcing per meter, if supplied separately from ``met``.
+        altitude_ft : npt.NDArray[np.floating] or None
+            Candidate flight levels in feet, used only with ``met``. If *None*, the
+            eastbound/westbound defaults from :func:`cruise_flight_levels` are used. With
+            ``fl_profile`` the levels come from its ``altitude_ft`` coordinate.
+        cost_index : float, default 60.0
+            Fuel-vs-time tradeoff in kg per minute.
+        dollar_tonne_co2e : float, default 0.0
+            Carbon price per tonne CO2-equivalent. If positive, the met source must carry
+            ``eef_per_m``.
+        dollar_kg_fuel : float, default 1.0
+            Fuel price per kg, converting carbon cost into fuel-equivalent units.
+        allow_cooling_credit : bool, default False
+            If True, negative EEF reduces cost when ``dollar_tonne_co2e`` is set.
+        use_flown_climb_descent : bool, default False
+            If True, the flown initial climb and final descent below the lowest candidate
+            flight level are taken from ``flight`` unchanged, and only the cruise phase above
+            it is optimized.
+        """
         if not flight:
             raise ValueError("Flight must be non-empty")
+        if (met is None) == (fl_profile is None):
+            raise ValueError("Provide exactly one of 'met' or 'fl_profile'")
 
         aircraft_type = aircraft_type or flight.get_constant("aircraft_type", None)
         if aircraft_type is None:
-            raise ValueError("aircraft_type must be provided or present in flight.attrs")
+            raise ValueError("An 'aircraft_type' must be provided or present in flight.attrs")
 
         origin_icao = origin_icao or flight.get_constant("origin_airport", None)
         dest_icao = dest_icao or flight.get_constant("destination_airport", None)
-
+        lon = flight["longitude"]
+        lat = flight["latitude"]
         if origin_icao is None:
-            origin_icao = airports.find_nearest_airport(
-                airports.global_airport_database(),
-                flight["longitude"][0].item(),
-                flight["latitude"][0].item(),
-                altitude=0.0,
-                bbox=0.5,  # arbitrary
-            )
-            if origin_icao is None:
-                raise ValueError("No airport found near flight origin")
+            origin_icao = _nearest_airport(lon[0].item(), lat[0].item(), "origin")
         if dest_icao is None:
-            dest_icao = airports.find_nearest_airport(
-                airports.global_airport_database(),
-                flight["longitude"][-1].item(),
-                flight["latitude"][-1].item(),
-                altitude=0.0,
-                bbox=0.5,  # arbitrary
-            )
-            if dest_icao is None:
-                raise ValueError("No airport found near flight destination")
+            dest_icao = _nearest_airport(lon[-1].item(), lat[-1].item(), "destination")
 
-        dag = HorizontalDAG.from_flight(flight, max_dist_m=max_dist_m)
-        return cls(
+        if fl_profile is not None:
+            ds = fl_profile
+        else:
+            if altitude_ft is None:
+                altitude_ft = cruise_flight_levels(origin_icao, dest_icao)
+            ds = flight_profile_from_met(met, lon, lat, flight["time"], altitude_ft, eef=eef)
+
+        return cls._from_profile(
+            ds,
+            flight,
+            aircraft_type,
             origin_icao,
             dest_icao,
-            aircraft_type,
-            pd.Timestamp(flight["time"][0]),
-            met=met,
-            eef=eef,
-            dag=dag,
             cost_index=cost_index,
             dollar_tonne_co2e=dollar_tonne_co2e,
             dollar_kg_fuel=dollar_kg_fuel,
-            met_spacing_m=met_spacing_m,
             allow_cooling_credit=allow_cooling_credit,
+            use_flown_climb_descent=use_flown_climb_descent,
         )
+
+    @classmethod
+    def _from_profile(
+        cls,
+        ds: xr.Dataset,
+        flight: Flight,
+        aircraft_type: str,
+        origin_icao: str,
+        dest_icao: str,
+        *,
+        cost_index: float,
+        dollar_tonne_co2e: float,
+        dollar_kg_fuel: float,
+        allow_cooling_credit: bool,
+        use_flown_climb_descent: bool,
+    ) -> Self:
+        """Construct a track optimizer from a validated per-waypoint profile and its flight."""
+        lon_f = flight["longitude"]
+        lat_f = flight["latitude"]
+        time_f = flight["time"]
+        cruise_elev_ft: float | None
+
+        if not use_flown_climb_descent:
+            toc = 0
+            tod = flight.size - 1
+            cruise_elev_ft = None
+        else:
+            # Hand off to the optimizer at the lowest candidate flight level: reuse the flown
+            # climb up to the first waypoint that reaches it, and the descent past the last.
+            thres = ds["altitude_ft"].min().item()
+            above = flight.altitude_ft >= thres
+            if not above.any():
+                raise ValueError(f"Flight never reaches the lowest candidate FL ({thres:.0f} ft)")
+
+            reached = np.flatnonzero(above)
+            toc = reached[0].item()
+            tod = reached[-1].item()
+            cruise_elev_ft = thres
+
+        sl = slice(toc, tod + 1)
+        lon, lat, time = lon_f[sl], lat_f[sl], time_f[sl]
+        ds_cruise = ds.isel(waypoint=sl)
+
+        # The profile path follows a fixed track, so it needs only the ordered timed
+        # waypoints, not an edge set -- a Track, not a HorizontalDAG.
+        track = Track(lon=lon, lat=lat, node_time=time)
+
+        opt = cls(
+            origin_icao,
+            dest_icao,
+            aircraft_type,
+            takeoff_time=pd.Timestamp(time[0]),
+            met=None,
+            dag=track,
+            cost_index=cost_index,
+            dollar_kg_fuel=dollar_kg_fuel,
+            allow_cooling_credit=allow_cooling_credit,
+            fl_choices=ds_cruise["altitude_ft"].values.astype(FLOAT_DTYPE),
+        )
+
+        # store the validated profile for solve_track to read by position.
+        opt.profile_ds = validate_flight_profile(ds_cruise, opt.dag.n_nodes)
+
+        if cruise_elev_ft is not None:
+            opt.cruise_elev_ft = cruise_elev_ft
+            opt.prepend_flown = {
+                "longitude": lon_f[:toc],
+                "latitude": lat_f[:toc],
+                "altitude_ft": flight.altitude_ft[:toc],
+                "time": time_f[:toc],
+            }
+            opt.append_flown = {
+                "longitude": lon_f[tod + 1 :],
+                "latitude": lat_f[tod + 1 :],
+                "altitude_ft": flight.altitude_ft[tod + 1 :],
+                "cum_time_offset": time_f[tod + 1 :] - time_f[tod],
+            }
+
+        # dollar_tonne_co2e is applied after the profile is attached so we can validate against
+        # the profile's own variables rather than the (absent) gridded met in __init__.
+        if dollar_tonne_co2e:
+            if "eef_per_m" not in opt.profile_ds:
+                raise ValueError("ds must contain 'eef_per_m' when dollar_tonne_co2e is set")
+            opt.dollar_tonne_co2e = float(dollar_tonne_co2e)
+
+        return opt
 
     @property
     def eef_cost_factor(self) -> float:
@@ -1130,7 +1781,12 @@ class Optimizer:
 
     def __repr__(self) -> str:
         status = "solved" if self.result is not None else "unsolved"
-        met = "with met" if self.met_lookup is not None else "no met"
+        if self.profile_ds is not None:
+            met = "profile"
+        elif self.met_lookup is not None:
+            met = "with met"
+        else:
+            met = "no met"
         name = type(self).__name__
         return (
             f"{name}({self.origin.icao_code} -> {self.dest.icao_code}, "
@@ -1187,9 +1843,12 @@ class Optimizer:
         if dollar_tonne_co2e is not None:
             self.dollar_tonne_co2e = float(dollar_tonne_co2e)
             if self.dollar_tonne_co2e:
-                if self.met_lookup is None:
+                if self.profile_ds is not None:
+                    if "eef_per_m" not in self.profile_ds:
+                        raise ValueError("profile must contain 'eef_per_m' when pricing carbon")
+                elif self.met_lookup is None:
                     raise ValueError("met must be provided when dollar_tonne_co2e is set")
-                if "eef_per_m" not in self.met_lookup.ds:
+                elif "eef_per_m" not in self.met_lookup.ds:
                     raise ValueError("met must contain 'eef_per_m' when dollar_tonne_co2e is set")
         if allow_cooling_credit is not None:
             self.allow_cooling_credit = allow_cooling_credit
@@ -1211,24 +1870,61 @@ class Optimizer:
         fuel_estimate = _estimate_trip_fuel(self.origin, self.dest, self.atyp, landing_mass)
         amass_init = min(landing_mass + fuel_estimate, self.atyp.amass_mtow)
 
+        on_track = self.profile_ds is not None
+
+        # When the flown climb is reused, the DP starts at the hand-off altitude, not the
+        # ground. Estimate the fuel burned climbing there and reduce the initial mass, and
+        # have solve_track climb/descend from the hand-off elevation rather than the airport.
+        climb_elev = self.origin.elevation_ft
+        dest_elev = self.dest.elevation_ft
+        if self.cruise_elev_ft is not None:
+            # climb_to_target returns (dist, fuel, time, mass)
+            flown_climb_fuel = ps.climb_to_target(
+                amass_init, self.origin.elevation_ft, self.cruise_elev_ft, self.atyp
+            )[1]
+            amass_init -= flown_climb_fuel
+            climb_elev = self.cruise_elev_ft
+            dest_elev = self.cruise_elev_ft
+
         for _ in range(n_iter):
-            state = solve_dag(
-                dag=self.dag,
-                amass_init=amass_init,
-                fl_choices=self.fl_choices,
-                mach_choices=self.mach_choices,
-                atyp=self.atyp,
-                cost_index=self.cost_index,
-                eef_cost_factor=self.eef_cost_factor,
-                origin_elev_ft=self.origin.elevation_ft,
-                dest_elev_ft=self.dest.elevation_ft,
-                takeoff_time=self.takeoff_time,
-                met_lookup=self.met_lookup,
-                allow_cooling_credit=self.allow_cooling_credit,
-            )
+            if on_track:
+                state = solve_track(
+                    dag=self.dag,
+                    profile=self.profile_ds,
+                    amass_init=amass_init,
+                    fl_choices=self.fl_choices,
+                    mach_choices=self.mach_choices,
+                    atyp=self.atyp,
+                    cost_index=self.cost_index,
+                    eef_cost_factor=self.eef_cost_factor,
+                    origin_elev_ft=climb_elev,
+                    dest_elev_ft=dest_elev,
+                    allow_cooling_credit=self.allow_cooling_credit,
+                )
+            else:
+                state = solve_dag(
+                    dag=self.dag,
+                    amass_init=amass_init,
+                    fl_choices=self.fl_choices,
+                    mach_choices=self.mach_choices,
+                    atyp=self.atyp,
+                    cost_index=self.cost_index,
+                    eef_cost_factor=self.eef_cost_factor,
+                    origin_elev_ft=self.origin.elevation_ft,
+                    dest_elev_ft=self.dest.elevation_ft,
+                    takeoff_time=self.takeoff_time,
+                    met_lookup=self.met_lookup,
+                    allow_cooling_credit=self.allow_cooling_credit,
+                )
             ground_fi = len(self.fl_choices)
             amass_final = state.best_mass[self.dag.h_dest, ground_fi].item()
             if not np.isfinite(amass_final):
+                if on_track:
+                    raise ValueError(
+                        "No feasible path found along the track. The profile may be too "
+                        "short for the initial climb and final descent to fit, or every "
+                        "candidate flight level is infeasible at the required masses."
+                    )
                 raise ValueError(
                     "No feasible path found. DAG edges may be too short for the "
                     "initial climb or final descent. Try adjusting the max_dist_m "
@@ -1319,6 +2015,72 @@ class Optimizer:
             raise RuntimeError("Path reconstruction did not reach origin")
 
         return np.array(path_h), np.array(path_fl_idx), np.array(path_mach)
+
+    def _track_waypoints(
+        self,
+        h_src: int,
+        h_dst: int,
+        fi_src: int,
+        fi_dst: int,
+        leg_mach: float,
+        skip_first: bool,
+    ) -> npt.NDArray[_WAYPOINT_DTYPE]:
+        """Emit waypoints for one leg of a track solution.
+
+        Every waypoint the leg spans is emitted, so the flight follows the supplied path.
+        Both altitude and elapsed time interpolate linearly by distance between the leg's
+        DP endpoints. That is exact for a level cruise; for a climb or descent leg it is an
+        approximation, since those phases run slower than cruise -- the intermediate
+        waypoint times are slightly off while the endpoints are exact.
+        """
+        state = self.result.state
+        dag = self.dag
+        ds = self.profile_ds
+        n_fl = len(self.fl_choices)
+        ground_fi = n_fl
+
+        nodes = np.arange(h_src + int(skip_first), h_dst + 1, dtype=np.int64)
+        n_samp = len(nodes)
+
+        cum = dag.cum_dist
+        span = (cum[h_dst] - cum[h_src]).item()
+        frac = (cum[nodes] - cum[h_src]) / span if span > 0.0 else np.zeros(n_samp)
+
+        # The destination is reached at the ground slot, so take the FL descended from
+        cruise_fi = fi_dst if fi_dst < n_fl else fi_src
+        # When the climb/descent come from the flight, the cruise starts and ends at the
+        # hand-off altitude, not the airport ground; the flown segments below splice on later.
+        ground_alt = self.cruise_elev_ft if self.cruise_elev_ft is not None else None
+        src_alt = (
+            (ground_alt if ground_alt is not None else self.origin.elevation_ft)
+            if fi_src == ground_fi
+            else self.fl_choices[fi_src]
+        )
+        dst_alt = (
+            (ground_alt if ground_alt is not None else self.dest.elevation_ft)
+            if h_dst == dag.h_dest
+            else self.fl_choices[cruise_fi]
+        )
+
+        t_src = state.best_time[h_src, fi_src]
+        t_dst = state.best_time[h_dst, fi_dst]
+        elapsed = t_src + frac * (t_dst - t_src)
+
+        eef = ds["eef_per_m"].values[nodes, cruise_fi] if "eef_per_m" in ds else 0.0
+
+        out = np.empty(n_samp, dtype=_WAYPOINT_DTYPE)
+        out["longitude"] = dag.lon[nodes]
+        out["latitude"] = dag.lat[nodes]
+        out["altitude_ft"] = src_alt + frac * (dst_alt - src_alt)
+        out["elapsed_s"] = elapsed
+        out["mach_number"] = leg_mach
+        out["eef_per_m"] = eef
+        out["air_temperature"] = ds["air_temperature"].values[nodes, cruise_fi]
+        out["eastward_wind"] = ds["u_wind"].values[nodes, cruise_fi]
+        out["northward_wind"] = ds["v_wind"].values[nodes, cruise_fi]
+        out["node_index"] = nodes
+        out["sample_index"] = nodes
+        return out
 
     def _edge_waypoints(
         self,
@@ -1460,7 +2222,8 @@ class Optimizer:
         n_fl = len(self.fl_choices)
         ground_fi = n_fl
 
-        if self.met_lookup is None:
+        if self.met_lookup is None and self.profile_ds is None:
+            # No met at all: one waypoint per node, ISA-only solve.
             # Shift mach from incoming-leg to departing-leg semantics
             path_mach[:-1] = path_mach[1:]
             path_mach[-1] = 0.0
@@ -1484,8 +2247,21 @@ class Optimizer:
                 aircraft_type=self.aircraft_type,
             )
 
-        wpts = np.concatenate(
-            [
+        if self.profile_ds is not None:
+            legs = [
+                self._track_waypoints(
+                    path_h[k],
+                    path_h[k + 1],
+                    path_fl_idx[k],
+                    path_fl_idx[k + 1],
+                    path_mach[k + 1],
+                    skip_first=(k > 0),
+                )
+                for k in range(len(path_h) - 1)
+            ]
+            has_eef = "eef_per_m" in self.profile_ds
+        else:
+            legs = [
                 self._edge_waypoints(
                     path_h[k],
                     path_h[k + 1],
@@ -1496,25 +2272,56 @@ class Optimizer:
                 )
                 for k in range(len(path_h) - 1)
             ]
-        )
+            has_eef = "eef_per_m" in self.met_lookup.ds
+        wpts = np.concatenate(legs)
 
+        lon = wpts["longitude"]
+        lat = wpts["latitude"]
+        alt = wpts["altitude_ft"]
         time = self.takeoff_time + pd.to_timedelta(wpts["elapsed_s"], unit="s")
 
-        data: dict[str, npt.NDArray] = {
+        data = {
             "mach_number": wpts["mach_number"],
             "air_temperature": wpts["air_temperature"],
             "u_wind": wpts["eastward_wind"],  # use u/v names for pycontrails compatibility
             "v_wind": wpts["northward_wind"],
+            "node_index": wpts["node_index"],
+            "sample_index": wpts["sample_index"],
         }
-        data["node_index"] = wpts["node_index"]
-        data["sample_index"] = wpts["sample_index"]
-        if "eef_per_m" in self.met_lookup.ds:
+        if has_eef:
             data["eef_per_m"] = wpts["eef_per_m"]
 
+        # Splice the flown climb and descent back on
+        if self.prepend_flown is not None:
+            pre = self.prepend_flown
+            app = self.append_flown
+            app_time = time[-1] + app["cum_time_offset"]
+
+            n_pre, n_app = len(pre["longitude"]), len(app["longitude"])
+            lon = np.concatenate([pre["longitude"], lon, app["longitude"]])
+            lat = np.concatenate([pre["latitude"], lat, app["latitude"]])
+            alt = np.concatenate([pre["altitude_ft"], alt, app["altitude_ft"]])
+            time = np.concatenate([pre["time"], time.to_numpy(), app_time])
+
+            for key, fill in (
+                ("mach_number", np.nan),
+                ("air_temperature", np.nan),
+                ("u_wind", np.nan),
+                ("v_wind", np.nan),
+                ("eef_per_m", np.nan),
+                ("node_index", -1),
+                ("sample_index", -1),
+            ):
+                if key in data:
+                    dt = np.int64 if key.endswith("index") else data[key].dtype
+                    data[key] = np.concatenate(
+                        [np.full(n_pre, fill, dtype=dt), data[key], np.full(n_app, fill, dtype=dt)]
+                    )
+
         return Flight(
-            longitude=wpts["longitude"],
-            latitude=wpts["latitude"],
-            altitude_ft=wpts["altitude_ft"],
+            longitude=lon,
+            latitude=lat,
+            altitude_ft=alt,
             time=time,
             data=data,
             aircraft_type=self.aircraft_type,
@@ -1552,7 +2359,7 @@ class Optimizer:
         GeoAxes
             The axes with the met overlay.
         """
-        if self.met_lookup is None:
+        if self.met_lookup is None and self.profile_ds is None:
             raise ValueError("No met data available; pass met to Optimizer to use plot_met")
 
         if ax is None:
@@ -1578,40 +2385,44 @@ class Optimizer:
                     zorder=3,
                 )
 
-        ds = self.met_lookup.ds
-
-        if altitude_ft is None:
-            altitude_ft = ds["altitude_ft"][0]
-        if time is None:
-            time = ds["time"][0]
-
-        sel = ds.sel(altitude_ft=altitude_ft, time=time, method="nearest")
-
-        # Get one sample index per node (first sample of each node's first outgoing edge)
-        has_edges = self.dag.out_degree > 0
-        node_sample_idx = self.met_lookup.edge_ptr[self.dag.adj_ptr[:-1][has_edges]]
-        node_lon = self.dag.lon[has_edges]
-        node_lat = self.dag.lat[has_edges]
-
-        if show_wind_quiver:
+        # Select per-node wind and EEF at the chosen flight level. The profile path stores met
+        # directly per waypoint (no time dim); the gridded path reads it off edge samples.
+        if self.profile_ds is not None:
+            ds = self.profile_ds
+            if altitude_ft is None:
+                altitude_ft = ds["altitude_ft"][0].item()
+            sel = ds.sel(altitude_ft=altitude_ft, method="nearest")
+            node_lon = self.dag.lon
+            node_lat = self.dag.lat
+            u = sel["u_wind"].values
+            v = sel["v_wind"].values
+            eef = sel["eef_per_m"].values if "eef_per_m" in ds else None
+            sel_time = None
+        else:
+            ds = self.met_lookup.ds
+            if altitude_ft is None:
+                altitude_ft = ds["altitude_ft"][0]
+            if time is None:
+                time = ds["time"][0]
+            sel = ds.sel(altitude_ft=altitude_ft, time=time, method="nearest")
+            # One sample index per node (first sample of each node's first outgoing edge)
+            has_edges = self.dag.out_degree > 0
+            node_sample_idx = self.met_lookup.edge_ptr[self.dag.adj_ptr[:-1][has_edges]]
+            node_lon = self.dag.lon[has_edges]
+            node_lat = self.dag.lat[has_edges]
             u = sel.eastward_wind.values[node_sample_idx]
             v = sel.northward_wind.values[node_sample_idx]
+            eef = sel.eef_per_m.values[node_sample_idx] if "eef_per_m" in ds else None
+            sel_time = pd.Timestamp(sel["time"].item())
 
+        if show_wind_quiver:
             kwargs.setdefault("alpha", 0.6)
             kwargs.setdefault("headwidth", 2)
             kwargs.setdefault("headlength", 2)
             kwargs.setdefault("headaxislength", 1.5)
-            ax.quiver(
-                node_lon,
-                node_lat,
-                u,
-                v,
-                transform=ax.projection,
-                **kwargs,
-            )
+            ax.quiver(node_lon, node_lat, u, v, transform=ax.projection, **kwargs)
 
-        if show_eef and "eef_per_m" in ds:
-            eef = sel.eef_per_m.values[node_sample_idx]
+        if show_eef and eef is not None:
             finite = np.isfinite(eef)
             vmax = np.abs(eef[finite]).max()
             tcf = ax.tricontourf(
@@ -1631,8 +2442,8 @@ class Optimizer:
             fig.colorbar(tcf, cax=cax, orientation="horizontal", label="EEF (J/m)")
 
         fl = round(sel["altitude_ft"].item() / 100)
-        t = pd.Timestamp(sel["time"].item())
-        ax.set_title(f"FL{fl} — {t:%Y-%m-%d %H:%M UTC}")
+        title = f"FL{fl}" if sel_time is None else f"FL{fl} — {sel_time:%Y-%m-%d %H:%M UTC}"
+        ax.set_title(title)
         return ax
 
     def animate_solve(self, display_fl_idx: int | None = None) -> "FuncAnimation":

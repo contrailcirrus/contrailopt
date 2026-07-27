@@ -15,7 +15,6 @@ from contrailopt.optimize import (
     FLOAT_DTYPE,
     DAGState,
     Optimizer,
-    _build_dag,
     _compute_edge_climbs,
     _compute_ground_climbs,
     _cruise_zone_weights,
@@ -23,6 +22,7 @@ from contrailopt.optimize import (
     _estimate_sample_times,
     _expand_edge_samples,
     _isa_cruise,
+    _prepare_dag,
     cruise_flight_levels,
     estimate_flight_hours,
     solve_dag,
@@ -583,7 +583,7 @@ class TestBuildDag:
         """Passing dag=None generates a new Poisson DAG."""
         origin = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13)
         dest = AirportCoords(icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128)
-        dag = _build_dag(origin, dest, dag=None, avoidance_regions=None)
+        dag = _prepare_dag(origin, dest, dag=None, avoidance_regions=None)
 
         assert dag.n_nodes > 2
         assert dag.n_edges > 0
@@ -597,7 +597,7 @@ class TestBuildDag:
         exist = HorizontalDAG.from_poisson(
             *origin.coords, *dest.coords, dtype=FLOAT_DTYPE
         ).prune_unreachable()
-        dag = _build_dag(origin, dest, dag=exist, avoidance_regions=None)
+        dag = _prepare_dag(origin, dest, dag=exist, avoidance_regions=None)
         assert dag == exist
 
     def test_rejects_mismatched_dag(self) -> None:
@@ -608,7 +608,7 @@ class TestBuildDag:
         dest = AirportCoords(icao_code="KBOS", longitude=-71.01, latitude=42.36, elevation_ft=20.0)
         wrong = HorizontalDAG.from_poisson(-118.0, 34.0, -87.0, 42.0).prune_unreachable()
         with pytest.raises(ValueError, match="does not agree"):
-            _build_dag(origin, dest, dag=wrong, avoidance_regions=None)
+            _prepare_dag(origin, dest, dag=wrong, avoidance_regions=None)
 
 
 class TestOptimizer:

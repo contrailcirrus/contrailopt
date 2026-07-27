@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import xarray as xr
+from pycontrails import MetDataArray, MetDataset
 from pycontrails.physics import units
 
 
@@ -125,6 +126,119 @@ def select_flight_times(
         )
 
     return usable
+
+
+def flight_profile_from_met(
+    met: MetDataset | xr.Dataset,
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
+    time: npt.NDArray[np.datetime64],
+    altitude_ft: npt.NDArray[np.floating],
+    eef: xr.DataArray | MetDataArray | None = None,
+) -> xr.Dataset:
+    """Interpolate gridded met onto a flight's waypoints at every candidate altitude.
+
+    Produces the ``(waypoint, altitude_ft)`` profile that ``Optimizer.from_flight``
+    consumes as its ``fl_profile``, so the gridded and profile entry points share a single
+    downstream representation. Each waypoint's column is taken at that waypoint's own time,
+    which freezes met against the supplied schedule.
+
+    Parameters
+    ----------
+    met : MetDataset or xr.Dataset
+        Gridded met with ``air_temperature``, ``eastward_wind``, ``northward_wind``,
+        and optionally ``eef_per_m``.
+    lon, lat : npt.NDArray[np.floating]
+        Waypoint coordinates in degrees.
+    time : npt.NDArray[np.datetime64]
+        Waypoint times, used to select the met time step for each column.
+    altitude_ft : npt.NDArray[np.floating]
+        Candidate flight levels in feet.
+    eef : xr.DataArray or MetDataArray or None
+        Effective energy forcing per meter, if supplied separately from ``met``.
+
+    Returns
+    -------
+    xr.Dataset
+        Dims ``(waypoint, altitude_ft)`` with ``air_temperature``, ``u_wind``, ``v_wind``,
+        and (when available) ``eef_per_m``; coords ``longitude``, ``latitude``, ``time``.
+    """
+    def _to_ds(obj: MetDataset | xr.Dataset) -> xr.Dataset:
+        return obj.data if isinstance(obj, MetDataset) else MetDataset(obj).data
+
+    ds = _to_ds(met)
+
+    variables = ["air_temperature", "eastward_wind", "northward_wind"]
+    if "eef_per_m" in ds and eef is None:
+        variables.append("eef_per_m")
+    ds = ds[variables]
+
+    # Keep only the hourly steps bracketing the waypoint times
+    t = pd.DatetimeIndex(time)
+    usable = pd.DatetimeIndex(ds["time"])
+    keep = (usable >= t.min().floor("1h")) & (usable <= t.max().ceil("1h"))
+    if not keep.any():
+        raise ValueError(
+            f"No met data covers the flight window {t.min()} ... {t.max()}. "
+            f"Available: {usable[0]} ... {usable[-1]}"
+        )
+    ds = ds.isel(time=keep)
+
+    ds = localize_horizontally(ds, lon, lat)
+    ds = to_altitude_ft(ds, altitude_ft)
+    ds = bilinear_interp(ds, lon, lat)  # (sample, altitude_ft, time)
+
+    if eef is not None:
+        da_eef = eef.data if isinstance(eef, MetDataArray) else eef
+        ds_eef = _to_ds(da_eef.to_dataset(name="eef_per_m"))
+        ds_eef = ds_eef.isel(time=keep)
+        ds_eef = localize_horizontally(ds_eef, lon, lat)
+        ds_eef = to_altitude_ft(ds_eef, altitude_ft)
+        # Bypass xarray coord alignment - eef altitude_ft may differ slightly from met's
+        ds["eef_per_m"] = (
+            ("sample", "altitude_ft", "time"),
+            bilinear_interp(ds_eef, lon, lat)["eef_per_m"].values,
+        )
+
+    profile = _select_waypoint_times(ds, time)
+    profile = profile.rename(eastward_wind="u_wind", northward_wind="v_wind")
+
+    return profile.assign_coords(
+        longitude=("waypoint", lon),
+        latitude=("waypoint", lat),
+        time=("waypoint", time),
+    )
+
+
+def _select_waypoint_times(
+    ds: xr.Dataset,
+    time: npt.NDArray[np.datetime64],
+) -> xr.Dataset:
+    """Collapse the time dim by interpolating each sample at its own waypoint time."""
+    tc = ds["time"].values
+    n = len(time)
+
+    if len(tc) == 1:
+        lo = hi = np.zeros(n, dtype=np.int64)
+        w = np.zeros(n, dtype=np.float32)
+    else:
+        ts = (tc - tc[0]) / np.timedelta64(1, "s")
+        query = (time - tc[0]) / np.timedelta64(1, "s")
+        frac = np.interp(query, ts, np.arange(len(tc), dtype=np.float64))
+        lo = np.floor(frac).astype(np.int64)
+        hi = np.minimum(lo + 1, len(tc) - 1)
+        w = (frac - lo).astype(np.float32)
+
+    rows = np.arange(n)
+    w2 = w[:, np.newaxis]
+    data_vars = {}
+    for name, da in ds.items():
+        v = da.transpose("sample", "altitude_ft", "time").values
+        # Advanced indices separated by a slice: result is (waypoint, altitude_ft)
+        col = v[rows, :, lo] * (1.0 - w2) + v[rows, :, hi] * w2
+        data_vars[name] = (("waypoint", "altitude_ft"), col)
+
+    return xr.Dataset(data_vars, coords={"altitude_ft": ds["altitude_ft"].values})
 
 
 def to_altitude_ft(
