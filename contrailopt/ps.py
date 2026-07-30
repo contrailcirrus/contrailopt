@@ -8,7 +8,7 @@ from pycontrails.physics import units
 
 ENGINE_DETERIORATION_FACTOR = 0.025
 THRUST_FRACTION = 0.9
-ROCD_CLIMB_THRESHOLD = 300.0
+ROCD_CLIMB_THRESHOLD = 500.0
 MAX_THRUST_BUFFER = 0.0
 
 
@@ -460,3 +460,28 @@ def final_descent(
     ).astype(src_alt_ft.dtype)
 
     return descent_dist, descent_fuel, descent_time
+
+
+def step_descent_geometry(
+    src_alt_ft: npt.NDArray[np.floating],
+    dst_alt_ft: npt.NDArray[np.floating],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """Compute the air distance and duration of a 3 degree step descent between two cruise FLs.
+
+    This function only provides geometry (no fuel flow).
+
+    Air distance is returned, not ground distance. Add ``tailwind * duration`` at the call site,
+    where the along-track wind is known.
+    """
+    descent_angle = np.float32(3.0)
+
+    drop_ft = np.maximum(src_alt_ft - dst_alt_ft, 0.0)
+    air_dist = units.ft_to_m(drop_ft) / np.tan(np.deg2rad(descent_angle))
+
+    # Speed is taken once at the midpoint altitude; the schedule Mach is flat across cruise FLs
+    mid_alt_ft = (src_alt_ft + dst_alt_ft) / 2.0
+    T_isa = units.m_to_T_isa(units.ft_to_m(mid_alt_ft))
+    tas = units.mach_number_to_tas(mach_schedule(mid_alt_ft, atyp), T_isa)
+
+    return air_dist, air_dist / tas

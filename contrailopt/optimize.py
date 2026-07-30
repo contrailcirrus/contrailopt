@@ -954,6 +954,16 @@ def _relax_transitions(
     )
 
 
+def _arrival_node(
+    cum: npt.NDArray[FLOAT_DTYPE],
+    src: int,
+    dist: npt.NDArray[FLOAT_DTYPE],
+    n_h: int,
+) -> npt.NDArray[np.int64]:
+    """Return the first waypoint at or beyond ``dist`` along the track from ``src``."""
+    return np.clip(np.searchsorted(cum, cum[src] + dist, side="left"), src + 1, n_h - 1)
+
+
 def solve_track(
     dag: HorizontalDAG | Track,
     profile: xr.Dataset,
@@ -991,6 +1001,14 @@ def solve_track(
     # For each flight level, compute the node at which the final descent has to begin
     tod_node = np.clip(np.searchsorted(cum, cum[h_dest] - fd_dist, side="right") - 1, 0, h_dest - 1)
 
+    # How far a step descent travels through the air before levelling off, for every
+    # (src, dest) level pair. Air distance doesn't depend on weather so we compute once up
+    # front; the caller adds wind drift to get ground distance. Used to choose the arrival
+    # waypoint. Cost is unchanged: a step down is still charged as cruise at the target level.
+    sd_air_dist, sd_time = ps.step_descent_geometry(
+        fl_choices[:, np.newaxis], fl_choices[np.newaxis, :], atyp
+    )
+
     state.best_cost[dag.h_origin, ground_fi] = 0.0
     state.best_mass[dag.h_origin, ground_fi] = amass_init
     state.best_time[dag.h_origin, ground_fi] = 0.0
@@ -1006,24 +1024,30 @@ def solve_track(
             # Nothing can transition backward into the ground slot, so it is always the
             # only active state at the origin
             src_mass = FLOAT_DTYPE(state.best_mass[h, ground_fi])
-            # Real along-track wind and temperature at the origin, lowest FL (as in solve_dag)
-            az0 = pa.seg_azimuth[h].item()
-            tw0 = pa.u_wind[h, 0] * np.sin(az0) + pa.v_wind[h, 0] * np.cos(az0)
-            disa0 = pa.air_temperature[h, 0] - units.m_to_T_isa(units.ft_to_m(fl_choices[0]))
+
+            # The climb to the lowest candidate FL is flown at ISA with no wind, so its distance
+            # is settled before any weather is read. Take the wind and temperature for the rest
+            # of the climb from the waypoint it reaches, where the aircraft is established on
+            # course.
+            base_dist = ps.climb_to_target(src_mass, origin_elev_ft, fl_choices[0], atyp)[0]
+            base_h = _arrival_node(cum, h, np.array([base_dist]), n_h).item()
+            az_base = pa.seg_azimuth[min(base_h, len(pa.seg_azimuth) - 1)].item()
+            u_base, v_base = pa.u_wind[base_h, 0], pa.v_wind[base_h, 0]
+            tw_base = u_base * np.sin(az_base) + v_base * np.cos(az_base)
+            isa_base = units.m_to_T_isa(units.ft_to_m(fl_choices[0]))
+            disa_base = pa.air_temperature[base_h, 0] - isa_base
+
             climb_dist, climb_fuel, climb_time, post_mass, feasible = _compute_ground_climbs(
                 fl_choices,
                 src_mass,
                 atyp,
                 origin_elev_ft,
-                np.array([[disa0]], dtype=FLOAT_DTYPE),
-                np.array([[tw0]], dtype=FLOAT_DTYPE),
+                np.array([[disa_base]], dtype=FLOAT_DTYPE),
+                np.array([[tw_base]], dtype=FLOAT_DTYPE),
             )
             climb_dist, climb_fuel = climb_dist[0], climb_fuel[0]
             climb_time, post_mass, feasible = climb_time[0], post_mass[0], feasible[0]
-
-            arrival = np.clip(
-                np.searchsorted(cum, cum[h] + climb_dist, side="left"), h + 1, n_h - 1
-            )
+            arrival = _arrival_node(cum, h, climb_dist, n_h)
             _relax_transitions(
                 pa,
                 state,
@@ -1085,7 +1109,13 @@ def solve_track(
         )
         feasible = feasible | (tgt_fl_2d <= src_fl_2d)
 
-        arrival = np.clip(np.searchsorted(cum, cum[h] + climb_dist, side="left"), h + 1, n_h - 1)
+        # The tabulated step-down distance is through the air; add wind drift for ground distance
+        desc_dist = np.maximum(
+            (sd_air_dist[active] + tw_src[:, np.newaxis] * sd_time[active]).reshape(-1), 0.0
+        )
+        reach = np.where(tgt_fl_2d < src_fl_2d, desc_dist, climb_dist)
+
+        arrival = _arrival_node(cum, h, reach, n_h)
         _relax_transitions(
             pa,
             state,
