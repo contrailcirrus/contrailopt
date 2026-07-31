@@ -964,6 +964,191 @@ def _arrival_node(
     return np.clip(np.searchsorted(cum, cum[src] + dist, side="left"), src + 1, n_h - 1)
 
 
+def _step_change(
+    pa: _ProfileArrays,
+    src_h: int,
+    src_fl: npt.NDArray[FLOAT_DTYPE],
+    tgt_fl: npt.NDArray[FLOAT_DTYPE],
+    src_mass: npt.NDArray[FLOAT_DTYPE],
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+) -> tuple[
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[np.int64],
+    npt.NDArray[np.bool_],
+]:
+    """Make a step climb or a step descent waypoint by waypoint, reading the weather as it flies.
+
+    A manoeuvre at cruise can take minutes and cover a hundred kilometers, and over that stretch
+    the heading and the wind both change. For this reason, it's important to use the entire
+    step geometry instead of just the geometry at the source node.
+
+    This function steps along the waypoints. At each one, it reads the temperature and wind at the
+    flight level nearest the current altitude, works out how long the segment takes at the
+    resulting ground speed, and gains or loses whatever altitude comes out. It stops on reaching the
+    target level.
+
+    A climb takes its rate from the thrust available; a descent follows a fixed 3 degree path.
+
+    Return a tuple of:
+    - ground distance covered in m
+    - fuel burned in kg
+    - time taken in s
+    - mass on levelling off in kg
+    - the first waypoint at or after levelling off
+    - a boolean feasibility mask
+    """
+    n_h = len(pa.cum_dist)
+
+    alt = np.asarray(src_fl, dtype=FLOAT_DTYPE).copy()
+    mass = np.asarray(src_mass, dtype=FLOAT_DTYPE).copy()
+    dist = np.zeros_like(alt)
+    fuel = np.zeros_like(alt)
+    time = np.zeros_like(alt)
+    arrival = np.full(len(alt), min(src_h + 1, n_h - 1), dtype=np.int64)
+    feasible = np.ones(len(alt), dtype=bool)
+
+    climbing = tgt_fl > src_fl
+    moving = climbing | (tgt_fl < src_fl)
+
+    for j in range(src_h, n_h - 1):
+        active = moving & feasible & (np.abs(tgt_fl - alt) > 1.0)
+        if not active.any():
+            break
+
+        # Weather at this waypoint, at the flight level nearest where the aircraft now is
+        fi = np.argmin(np.abs(fl_choices[np.newaxis, :] - alt[:, np.newaxis]), axis=1)
+        air_temperature = pa.air_temperature[j, fi]
+        az = pa.seg_azimuth[j].item()
+        tailwind = pa.u_wind[j, fi] * np.sin(az) + pa.v_wind[j, fi] * np.cos(az)
+
+        rocd = np.zeros_like(alt)
+        tas = np.ones_like(alt)
+        ff = np.zeros_like(alt)
+
+        up = active & climbing
+        if up.any():
+            with np.errstate(over="ignore", invalid="ignore"):
+                ff[up], rocd[up], tas[up], can_climb = ps.climb_performance(
+                    alt[up], mass[up], air_temperature[up], atyp
+                )
+            feasible[up] &= can_climb
+
+        down = active & ~climbing
+        if down.any():
+            with np.errstate(over="ignore", invalid="ignore"):
+                ff[down], rocd[down], tas[down] = ps.descent_performance(
+                    alt[down], mass[down], air_temperature[down], atyp
+                )
+
+        # Time to fly this segment and the altitude gained
+        ground_speed = np.maximum(tas + tailwind, 1.0)  # clip at 1 to avoid div by 0 (unlikely)
+        seg_time = pa.seg_dist[j] / ground_speed
+        gain = rocd / 60.0 * seg_time
+        remaining = tgt_fl - alt
+
+        # A manoeuvre that finishes inside this segment only takes the partial time it needs
+        done = np.abs(gain) >= np.abs(remaining)
+        part = np.divide(
+            np.abs(remaining) * 60.0,
+            np.abs(rocd),
+            out=np.zeros_like(alt),
+            where=rocd != 0.0,
+        )
+        step_time = np.where(done, part, seg_time)
+
+        step = active & feasible
+        dist[step] += (ground_speed * step_time)[step]
+        fuel[step] += (ff * step_time)[step]
+        time[step] += step_time[step]
+        mass[step] -= (ff * step_time)[step]
+        alt[step] = np.where(done, tgt_fl, alt + gain)[step]
+        arrival[step] = j + 1
+
+    # Anything still moving ran out of track before it levelled off, so mark it infeasible
+    feasible &= ~(moving & (np.abs(tgt_fl - alt) > 1.0))
+    return dist, fuel, time, mass, arrival, feasible
+
+
+def _determine_final_descent(
+    pa: _ProfileArrays,
+    h_dest: int,
+    dest_elev_ft: float,
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+) -> tuple[
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[np.int64],
+]:
+    """Reverse the final descent to the destination to determine where it begins.
+
+    The final descent is the longest manoeuvre of the flight (around 200 km and 15-20 minutes),
+    so it needs the weather along its length. It is computed backwards because the solver needs
+    to know where the descent starts, given that it has to finish at the runway. One walk up
+    from the destination crosses every candidate flight level in turn, so each level's top of
+    descent, distance, fuel and time all come out of the same calculation.
+
+    Mass is taken as the maximum landing weight, as :func:`ps.final_descent` does. Distance and
+    time do not depend on it, and the fuel depends only weakly.
+
+    Return a tuple of, one entry per candidate flight level:
+    - descent ground distance in m
+    - descent fuel in kg
+    - descent time in s
+    - the waypoint at or before which the descent must begin, or -1 if the track is too short
+    """
+    n_fl = len(fl_choices)
+    mass = np.array([atyp.amass_mlw], dtype=FLOAT_DTYPE)
+
+    dist = np.zeros(n_fl, dtype=FLOAT_DTYPE)
+    fuel = np.zeros(n_fl, dtype=FLOAT_DTYPE)
+    time = np.zeros(n_fl, dtype=FLOAT_DTYPE)
+    tod_node = np.full(n_fl, -1, dtype=np.int64)
+
+    alt = FLOAT_DTYPE(dest_elev_ft)
+    run_dist = run_fuel = run_time = FLOAT_DTYPE(0.0)
+
+    for j in range(h_dest - 1, -1, -1):
+        if (tod_node >= 0).all():
+            break
+
+        # Weather over the segment the aircraft flies from j to j+1, at the level nearest
+        # the altitude it is passing through there
+        fi = np.argmin(np.abs(fl_choices - alt)).item()
+        air_temperature = pa.air_temperature[j, fi : fi + 1]
+        az = pa.seg_azimuth[j].item()
+        tailwind = pa.u_wind[j, fi] * np.sin(az) + pa.v_wind[j, fi] * np.cos(az)
+
+        ff, rocd, tas = ps.descent_performance(
+            np.array([alt], dtype=FLOAT_DTYPE), mass, air_temperature, atyp
+        )
+        ground_speed = max((tas[0] + tailwind).item(), 1.0)
+        seg_time = pa.seg_dist[j] / ground_speed
+        rise = abs(rocd[0].item()) / 60.0 * seg_time  # altitude gained walking backwards
+
+        # Record every candidate level this segment passes through, at the fraction of the
+        # segment where the crossing happens rather than at the waypoint
+        crossed = (tod_node < 0) & (fl_choices > alt) & (fl_choices <= alt + rise)
+        if crossed.any() and rise > 0.0:
+            frac = (fl_choices[crossed] - alt) / rise
+            dist[crossed] = run_dist + frac * pa.seg_dist[j]
+            time[crossed] = run_time + frac * seg_time
+            fuel[crossed] = run_fuel + frac * ff[0] * seg_time
+            tod_node[crossed] = j
+
+        run_dist += pa.seg_dist[j]
+        run_time += seg_time
+        run_fuel += ff[0] * seg_time
+        alt += rise
+
+    return dist, fuel, time, tod_node
+
+
 def solve_track(
     dag: HorizontalDAG | Track,
     profile: xr.Dataset,
@@ -996,17 +1181,8 @@ def solve_track(
     cum = pa.cum_dist
     h_dest = dag.h_dest
 
-    fd_dist, fd_fuel, fd_time = ps.final_descent(fl_choices, dest_elev_ft, atyp)
-
-    # For each flight level, compute the node at which the final descent has to begin
-    tod_node = np.clip(np.searchsorted(cum, cum[h_dest] - fd_dist, side="right") - 1, 0, h_dest - 1)
-
-    # How far a step descent travels through the air before levelling off, for every
-    # (src, dest) level pair. Air distance doesn't depend on weather so we compute once up
-    # front; the caller adds wind drift to get ground distance. Used to choose the arrival
-    # waypoint. Cost is unchanged: a step down is still charged as cruise at the target level.
-    sd_air_dist, sd_time = ps.step_descent_geometry(
-        fl_choices[:, np.newaxis], fl_choices[np.newaxis, :], atyp
+    fd_dist, fd_fuel, fd_time, tod_node = _determine_final_descent(
+        pa, h_dest, dest_elev_ft, fl_choices, atyp
     )
 
     state.best_cost[dag.h_origin, ground_fi] = 0.0
@@ -1025,29 +1201,28 @@ def solve_track(
             # only active state at the origin
             src_mass = FLOAT_DTYPE(state.best_mass[h, ground_fi])
 
-            # The climb to the lowest candidate FL is flown at ISA with no wind, so its distance
-            # is settled before any weather is read. Take the wind and temperature for the rest
-            # of the climb from the waypoint it reaches, where the aircraft is established on
-            # course.
-            base_dist = ps.climb_to_target(src_mass, origin_elev_ft, fl_choices[0], atyp)[0]
-            base_h = _arrival_node(cum, h, np.array([base_dist]), n_h).item()
-            az_base = pa.seg_azimuth[min(base_h, len(pa.seg_azimuth) - 1)].item()
-            u_base, v_base = pa.u_wind[base_h, 0], pa.v_wind[base_h, 0]
-            tw_base = u_base * np.sin(az_base) + v_base * np.cos(az_base)
-            isa_base = units.m_to_T_isa(units.ft_to_m(fl_choices[0]))
-            disa_base = pa.air_temperature[base_h, 0] - isa_base
-
-            climb_dist, climb_fuel, climb_time, post_mass, feasible = _compute_ground_climbs(
-                fl_choices,
-                src_mass,
-                atyp,
-                origin_elev_ft,
-                np.array([[disa_base]], dtype=FLOAT_DTYPE),
-                np.array([[tw_base]], dtype=FLOAT_DTYPE),
+            # Below the lowest candidate FL the climb is flown at ISA with no wind, so it is the
+            # same for every target and its distance is settled before any weather is read. Fly
+            # that first, then step climb from the waypoint it reaches, at the lowest FL.
+            base_dist, base_fuel, base_time, base_mass = ps.climb_to_target(
+                src_mass, origin_elev_ft, fl_choices[0], atyp
             )
-            climb_dist, climb_fuel = climb_dist[0], climb_fuel[0]
-            climb_time, post_mass, feasible = climb_time[0], post_mass[0], feasible[0]
-            arrival = _arrival_node(cum, h, climb_dist, n_h)
+            base_h = _arrival_node(cum, h, np.array([base_dist]), n_h).item()
+
+            up_dist, up_fuel, up_time, post_mass, arrival, feasible = _step_change(
+                pa,
+                base_h,
+                np.full(n_fl, fl_choices[0], dtype=FLOAT_DTYPE),
+                fl_choices,
+                np.full(n_fl, base_mass, dtype=FLOAT_DTYPE),
+                fl_choices,
+                atyp,
+            )
+            climb_dist = FLOAT_DTYPE(base_dist) + up_dist
+            climb_fuel = FLOAT_DTYPE(base_fuel) + up_fuel
+            climb_time = FLOAT_DTYPE(base_time) + up_time
+            feasible = feasible | (fl_choices == fl_choices[0])
+            feasible &= arrival != h_dest
             _relax_transitions(
                 pa,
                 state,
@@ -1090,32 +1265,21 @@ def solve_track(
         tgt_fl_2d = np.tile(fl_choices, n_active)
         mass_2d = np.repeat(src_mass_active, n_fl)
 
-        # The climb must see the same along-track wind and temperature the cruise does,
-        # evaluated at the source node and source FL. Passing zero wind here (as an earlier
-        # version did) makes climbs cover ground at design-Mach TAS while cruise pays the
-        # real headwind, so the solver treats climbing as a faster way down the track and
-        # weaves to exploit it.
-        az_h = pa.seg_azimuth[min(h, len(pa.seg_azimuth) - 1)].item()
-        tw_src = pa.u_wind[h, active] * np.sin(az_h) + pa.v_wind[h, active] * np.cos(az_h)
-        disa_src = pa.air_temperature[h, active] - units.m_to_T_isa(units.ft_to_m(src_fl_active))
-
-        climb_dist, climb_fuel, climb_time, post_mass, feasible = ps.compute_climb_segment(
-            src_fl_2d,
-            tgt_fl_2d,
-            mass_2d,
-            atyp,
-            delta_isa=np.repeat(disa_src, n_fl),
-            tailwind=np.repeat(tw_src, n_fl),
+        step_dist, step_fuel, step_time, step_mass, arrival, feasible = _step_change(
+            pa, h, src_fl_2d, tgt_fl_2d, mass_2d, fl_choices, atyp
         )
-        feasible = feasible | (tgt_fl_2d <= src_fl_2d)
 
-        # The tabulated step-down distance is through the air; add wind drift for ground distance
-        desc_dist = np.maximum(
-            (sd_air_dist[active] + tw_src[:, np.newaxis] * sd_time[active]).reshape(-1), 0.0
-        )
-        reach = np.where(tgt_fl_2d < src_fl_2d, desc_dist, climb_dist)
+        # A step down is priced as level cruise at the target FL over the whole span.
+        step_down = tgt_fl_2d < src_fl_2d
+        lead_dist = np.where(step_down, 0.0, step_dist)
+        lead_fuel = np.where(step_down, 0.0, step_fuel)
+        lead_time = np.where(step_down, 0.0, step_time)
+        lead_mass = np.where(step_down, mass_2d, step_mass)
+        feasible = feasible | step_down | (tgt_fl_2d == src_fl_2d)
 
-        arrival = _arrival_node(cum, h, reach, n_h)
+        # Only the final descent below can finish the flight.
+        feasible &= arrival != h_dest
+
         _relax_transitions(
             pa,
             state,
@@ -1128,12 +1292,12 @@ def solve_track(
             src_fi=np.repeat(active, n_fl),
             src_cost=np.repeat(src_cost_active, n_fl),
             src_elapsed=np.repeat(src_elapsed_active, n_fl),
-            lead_dist=climb_dist,
+            lead_dist=lead_dist,
             trail_dist=np.zeros(n_active * n_fl, dtype=FLOAT_DTYPE),
-            fixed_fuel=climb_fuel,
-            fixed_time=climb_time,
-            cruise_mass=post_mass,
-            post_mass=post_mass,
+            fixed_fuel=lead_fuel,
+            fixed_time=lead_time,
+            cruise_mass=lead_mass,
+            post_mass=lead_mass,
             feasible=feasible,
             atyp=atyp,
             cost_index=cost_index,
