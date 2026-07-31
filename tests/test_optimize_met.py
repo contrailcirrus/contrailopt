@@ -154,7 +154,11 @@ class TestStepDown:
         line_dag: HorizontalDAG,
         met: MetDataset,
     ) -> None:
-        """All FLs at the destination should have finite cost (solver explored them)."""
+        """The reachable FLs run consecutively from the lowest, with no gaps.
+
+        A high FL can be unreachable because the climb to it drops below the minimum ROCD. A gap in
+        the middle cannot happen for that reason, and would mean the solver skipped a usable FL.
+        """
         origin, dest = route
 
         opt = optimize.Optimizer(
@@ -171,10 +175,10 @@ class TestStepDown:
 
         state = opt.result.state
         dest_costs = state.best_cost[line_dag.h_dest, : len(fl_choices)]
-        n_finite = np.isfinite(dest_costs).sum()
-        assert n_finite == len(fl_choices), (
-            f"Only {n_finite}/{len(fl_choices)} FLs reached destination: {dest_costs}"
-        )
+        finite = np.isfinite(dest_costs)
+
+        assert finite[0], f"Lowest FL did not reach the destination: {dest_costs}"
+        assert np.all(finite[: finite.sum()]), f"Gap in the reachable FLs: {dest_costs}"
 
 
 class TestToFlight:
