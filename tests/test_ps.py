@@ -117,8 +117,8 @@ class TestClimbPerformance:
         air_temperature = units.m_to_T_isa(units.ft_to_m(alt_ft))
 
         _, _, _, feasible = climb_performance(alt_ft, mass, air_temperature, atyp)
-        assert np.all(feasible[:9])  # FL270 through FL350
-        assert not np.any(feasible[9:])  # at FL360 and above not feasible to climb at MTOW
+        assert np.all(feasible[:7])  # FL270 through FL330
+        assert not np.any(feasible[7:])  # at FL340 and above not feasible to climb at MTOW
 
 
 class TestComputeClimbSegment:
@@ -166,7 +166,7 @@ class TestComputeClimbSegment:
     def test_heavier_aircraft_uses_more_fuel(self, atyp: PSParams) -> None:
         src_alt_ft = np.array([30000.0, 30000.0])
         dst_alt_ft = np.array([35000.0, 35000.0])
-        src_mass = np.array([65000.0, 75000.0])
+        src_mass = np.array([60000.0, 68000.0])  # both hold the minimum ROCD all the way up
 
         dist, fuel, time, _, feasible = compute_climb_segment(
             src_alt_ft, dst_alt_ft, src_mass, atyp, delta_isa=0.0, tailwind=0.0
@@ -231,11 +231,12 @@ class TestClimbToTarget:
         ground_alt_ft = 0.0
         target_alt_ft = 35000.0
 
+        # Above roughly 70 t the climb to FL350 drops below the minimum ROCD and raises
         _, fuel_light, _, _ = climb_to_target(
-            mass=70000.0, ground_alt_ft=ground_alt_ft, target_alt_ft=target_alt_ft, atyp=atyp
+            mass=60000.0, ground_alt_ft=ground_alt_ft, target_alt_ft=target_alt_ft, atyp=atyp
         )
         _, fuel_heavy, _, _ = climb_to_target(
-            mass=78000.0, ground_alt_ft=ground_alt_ft, target_alt_ft=target_alt_ft, atyp=atyp
+            mass=70000.0, ground_alt_ft=ground_alt_ft, target_alt_ft=target_alt_ft, atyp=atyp
         )
         assert fuel_heavy > fuel_light
 
