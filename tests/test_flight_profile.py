@@ -5,11 +5,18 @@ import pandas as pd
 import pytest
 import xarray as xr
 from pycontrails import Flight, MetDataset
+from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.physics import geo, units
 
+from contrailopt import ps
 from contrailopt.dag import AirportCoords, validate_flight_profile
 from contrailopt.grid_utils import flight_profile_from_met
-from contrailopt.optimize import Optimizer
+from contrailopt.optimize import (
+    FLOAT_DTYPE,
+    Optimizer,
+    _ProfileArrays,
+    _step_change,
+)
 
 
 @pytest.fixture
@@ -223,6 +230,177 @@ class TestFlownClimbDescent:
         out = solved.to_flight()
         node = out["node_index"] >= 0  # optimized cruise waypoints
         assert np.all(out["altitude_ft"][node] >= 31_000.0 - 1.0)
+
+
+class TestStepDescentGeometry:
+    """Confirm a step down is spread over the distance the descent covers."""
+
+    N = 200  # ~10 km waypoint spacing, shorter than a 2000 ft step descent
+    ALT_FT = np.arange(31000.0, 39001.0, 2000.0)
+
+    @staticmethod
+    def _track(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        origin = AirportCoords.from_icao("KJFK")
+        dest = AirportCoords.from_icao("KOMA")
+        lon = np.linspace(origin.longitude, dest.longitude, n)
+        lat = np.linspace(origin.latitude, dest.latitude, n)
+        seg = geo.haversine(lon[:-1], lat[:-1], lon[1:], lat[1:])
+        elapsed = np.r_[0.0, np.cumsum(seg / 230.0)]
+        time = np.datetime64("2025-02-01T12:00", "ns") + (elapsed * 1e9).astype("timedelta64[ns]")
+        return lon, lat, time
+
+    def _solve(self, u: np.ndarray) -> Optimizer:
+        lon, lat, time = self._track(self.N)
+        shape = (self.N, len(self.ALT_FT))
+        T_isa = units.m_to_T_isa(units.ft_to_m(self.ALT_FT))
+        profile = xr.Dataset(
+            {
+                "air_temperature": (("waypoint", "altitude_ft"), np.broadcast_to(T_isa, shape)),
+                "u_wind": (("waypoint", "altitude_ft"), u),
+                "v_wind": (("waypoint", "altitude_ft"), np.zeros(shape)),
+            },
+            coords={
+                "longitude": ("waypoint", lon),
+                "latitude": ("waypoint", lat),
+                "time": ("waypoint", time),
+                "altitude_ft": ("altitude_ft", self.ALT_FT),
+            },
+        )
+        flight = Flight(
+            longitude=lon,
+            latitude=lat,
+            time=time,
+            altitude_ft=np.full_like(lon, 35_000.0),
+            flight_id="step",
+            aircraft_type="A320",
+        )
+        opt = Optimizer.from_flight(flight, fl_profile=profile, aircraft_type="A320")
+        opt.solve()
+        return opt
+
+    @pytest.fixture
+    def stepping_down(self) -> Optimizer:
+        """The tailwind moves from the top FLs to the bottom ones, forcing a mid-route step down."""
+        shape = (self.N, len(self.ALT_FT))
+        u = np.zeros(shape, dtype=float)
+        u[: self.N // 2, 3:] = -50.0
+        u[self.N // 2 : self.N - 40, :2] = -50.0
+        return self._solve(u)
+
+    def test_step_down_covers_real_distance(self, stepping_down: Optimizer) -> None:
+        """Confirm a step descent advances more than one waypoint beyond the current one."""
+        path_h, path_fi, _ = stepping_down.reconstruct_path()
+
+        # Skip the origin, whose ground sentinel sits above every real FL
+        step_downs = [
+            (path_h[k], path_h[k + 1])
+            for k in range(1, len(path_h) - 1)
+            if path_fi[k + 1] < path_fi[k]
+        ]
+        assert step_downs, f"Expected a step down but path FLs were {path_fi}"
+        assert all(h_dst - h_src > 1 for h_src, h_dst in step_downs)
+
+    def test_no_descent_is_steeper_than_the_model(self, stepping_down: Optimizer) -> None:
+        """No descent in the output is steeper than a 3 degree path allows."""
+        out = stepping_down.to_flight()
+        dt = np.diff(out["time"]) / np.timedelta64(1, "s")
+        rocd = np.diff(out.altitude_ft) / dt * 60.0
+
+        # TAS is highest at the lowest candidate FL, and the fixture's tailwind peaks at 50 m/s
+        tas = units.mach_number_to_tas(
+            stepping_down.atyp.m_des, units.m_to_T_isa(units.ft_to_m(self.ALT_FT.min()))
+        )
+        limit = units.m_to_ft((tas + 50.0) * np.tan(np.deg2rad(3.0))) * 60.0
+        assert rocd.min() > -limit
+
+
+class TestStepChange:
+    ALT_FT = np.arange(29000.0, 39001.0, 2000.0)
+
+    @classmethod
+    def _profile_arrays(cls, u_wind: np.ndarray) -> _ProfileArrays:
+        """A due-east track of 10 km segments at ISA, with the given wind per waypoint.
+
+        Due east makes the along-track wind exactly ``u_wind``, so ground speed is TAS plus it.
+        """
+        n = len(u_wind)
+        shape = (n, len(cls.ALT_FT))
+        seg = np.full(n - 1, 10_000.0, dtype=FLOAT_DTYPE)
+        T_isa = units.m_to_T_isa(units.ft_to_m(cls.ALT_FT))
+        return _ProfileArrays(
+            air_temperature=np.broadcast_to(T_isa, shape).astype(FLOAT_DTYPE),
+            u_wind=np.broadcast_to(u_wind[:, np.newaxis], shape).astype(FLOAT_DTYPE),
+            v_wind=np.zeros(shape, dtype=FLOAT_DTYPE),
+            eef_per_m=None,
+            cum_dist=np.r_[0.0, np.cumsum(seg)].astype(FLOAT_DTYPE),
+            seg_dist=seg,
+            seg_azimuth=np.full(n - 1, np.pi / 2, dtype=FLOAT_DTYPE),
+        )
+
+    @classmethod
+    def _step(cls, u_wind: np.ndarray, src: float, tgt: float, mass: float = 60_000.0) -> tuple:
+        atyp = ps_aircraft_params.load_aircraft_engine_params()["A320"]
+        return _step_change(
+            cls._profile_arrays(np.asarray(u_wind, dtype=FLOAT_DTYPE)),
+            0,
+            np.array([src], dtype=FLOAT_DTYPE),
+            np.array([tgt], dtype=FLOAT_DTYPE),
+            np.array([mass], dtype=FLOAT_DTYPE),
+            cls.ALT_FT.astype(FLOAT_DTYPE),
+            atyp,
+        )
+
+    def test_wind_is_read_along_the_climb_not_at_its_start(self) -> None:
+        """Two climbs differing only after the first waypoint should not come out the same.
+
+        Both start with the same 50 m/s tailwind. One holds it constant, the other reverses
+        to a headwind immediately after.
+        """
+        held = np.full(120, 50.0)
+        reversing = np.full(120, -50.0)
+        reversing[0] = 50.0
+
+        dist_held = self._step(held, 31000.0, 35000.0)[0][0]
+        dist_reversing = self._step(reversing, 31000.0, 35000.0)[0][0]
+
+        assert dist_reversing < 0.8 * dist_held, (
+            f"climb covered {dist_reversing / 1000:.1f} km against {dist_held / 1000:.1f} km, "
+            "so the wind is being taken from the starting waypoint"
+        )
+
+    def test_descent_follows_the_three_degree_path_at_idle(self) -> None:
+        """A descent follows the 3 degree geometry and burns less than cruise fuel."""
+        dist, fuel, time, _, _, feasible = self._step(np.zeros(120), 35000.0, 31000.0)
+
+        assert feasible[0]
+        # A 4000 ft drop on a 3 degree path, flown in still air
+        assert dist[0] == pytest.approx(units.ft_to_m(4000.0) / np.tan(np.deg2rad(3.0)), rel=0.05)
+
+        # Descending burns real fuel, but far less per second than cruising
+        atyp = ps_aircraft_params.load_aircraft_engine_params()["A320"]
+        cruise_ff, _ = ps.cruise_performance(
+            np.array([33000.0]),
+            np.array([atyp.m_des]),
+            np.array([60_000.0]),
+            units.m_to_T_isa(units.ft_to_m(np.array([33000.0]))),
+            atyp,
+        )
+        assert 0.0 < fuel[0] / time[0] < 0.5 * cruise_ff[0]
+
+    def test_level_transition_does_nothing(self) -> None:
+        """Staying at the same level costs nothing and advances exactly one waypoint."""
+        dist, fuel, time, _, arrival, feasible = self._step(np.zeros(120), 35000.0, 35000.0)
+
+        assert feasible[0]
+        assert dist[0] == 0.0
+        assert fuel[0] == 0.0
+        assert time[0] == 0.0
+        assert arrival[0] == 1  # a plain cruise advances exactly one waypoint
+
+    def test_running_out_of_track_is_infeasible(self) -> None:
+        """A climb needing more track than remains cannot be flown."""
+        _, _, _, _, _, feasible = self._step(np.zeros(4), 29000.0, 39000.0)
+        assert not feasible[0]
 
 
 class TestProfileFromMet:
