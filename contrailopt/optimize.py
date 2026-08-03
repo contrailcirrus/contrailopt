@@ -1689,7 +1689,7 @@ class Optimizer:
         Fuel price in US dollars per kg. Only used to convert the carbon cost into the
         fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
     step_penalty_kg : float, default 0.0
-        Cost in kg of fuel charged for changing flight level, on top of the manoeuvre's own fuel
+        Cost in kg of fuel charged for changing flight level, on top of the maneuver's own fuel
         and time, to discourage marginally beneficial steps. The initial climb and final descent
         are exempt. The penalty enters the objective only, not the aircraft mass, so reported fuel
         burn stays physical.
