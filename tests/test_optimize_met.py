@@ -181,6 +181,34 @@ class TestStepDown:
         assert np.all(finite[: finite.sum()]), f"Gap in the reachable FLs: {dest_costs}"
 
 
+class TestStepPenalty:
+    """Confirm ``step_penalty_kg`` suppresses level changes in the 4d DAG solver."""
+
+    def test_a_large_penalty_flattens_the_cruise(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+    ) -> None:
+        origin, dest = route
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+        )
+        opt.solve(n_iter=2, payload=15_000.0)
+        unpenalized = np.count_nonzero(np.diff(opt.reconstruct_path()[1][1:-1]))
+        assert unpenalized > 0, "fixture no longer changes level, so there is nothing to suppress"
+
+        opt.solve(n_iter=2, payload=15_000.0, step_penalty_kg=10_000.0)
+        assert np.count_nonzero(np.diff(opt.reconstruct_path()[1][1:-1])) == 0
+
+
 class TestToFlight:
     """Verify to_flight() produces a valid Flight with met-derived fields."""
 

@@ -407,6 +407,7 @@ class TestSolveDag:
             takeoff_time=pd.Timestamp("2024-01-01"),
             met_lookup=None,
             allow_cooling_credit=False,
+            step_penalty_kg=0.0,
         )
 
         ground_fi = len(fl_choices)
@@ -433,6 +434,7 @@ class TestSolveDag:
             takeoff_time=pd.Timestamp("2024-01-01"),
             met_lookup=None,
             allow_cooling_credit=False,
+            step_penalty_kg=0.0,
         )
 
         ground_fi = len(fl_choices)
@@ -469,6 +471,7 @@ class TestSolveDag:
             "takeoff_time": pd.Timestamp("2024-01-01"),
             "met_lookup": None,
             "allow_cooling_credit": False,
+            "step_penalty_kg": 0.0,
         }
 
         result_low = solve_dag(**common, cost_index=10.0)
@@ -499,6 +502,7 @@ class TestSolveDag:
             takeoff_time=pd.Timestamp("2024-01-01"),
             met_lookup=None,
             allow_cooling_credit=False,
+            step_penalty_kg=0.0,
         )
 
         assert result.best_cost.dtype == FLOAT_DTYPE

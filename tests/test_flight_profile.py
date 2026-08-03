@@ -300,6 +300,13 @@ class TestStepDescentGeometry:
         assert step_downs, f"Expected a step down but path FLs were {path_fi}"
         assert all(h_dst - h_src > 1 for h_src, h_dst in step_downs)
 
+    def test_a_large_step_penalty_flattens_the_cruise(self, stepping_down: Optimizer) -> None:
+        """The ``step_penalty_kg`` is charged per step, so a large value removes all."""
+        assert np.count_nonzero(np.diff(stepping_down.reconstruct_path()[1][1:])) > 0
+
+        stepping_down.solve(step_penalty_kg=10_000.0)
+        assert np.count_nonzero(np.diff(stepping_down.reconstruct_path()[1][1:])) == 0
+
     def test_no_descent_is_steeper_than_the_model(self, stepping_down: Optimizer) -> None:
         """No descent in the output is steeper than a 3 degree path allows."""
         out = stepping_down.to_flight()
