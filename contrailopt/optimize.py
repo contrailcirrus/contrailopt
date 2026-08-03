@@ -327,6 +327,7 @@ class _SolverCtx:
     atyp: ps_aircraft_params.PSAircraftEngineParams
     cost_index: float  # kg fuel / minute of flight time
     eef_cost_factor: float  # kg fuel / EEF Joule
+    step_penalty_kg: float  # artificial kg fuel penalty for step climbs, on top of the maneuver
     allow_cooling_credit: bool
     origin_elev_ft: float
     dest_elev_ft: float
@@ -641,10 +642,17 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
         * (cruise_eef if ctx.allow_cooling_credit else np.maximum(cruise_eef, 0.0))
     )[:, :, np.newaxis]
 
+    # Add an artificial penalty for any step climb / descent.
+    # Exclude both initial climb and final descent from the penalty.
+    edge_src_fi = fl_idxs[src_idx][:, np.newaxis]
+    is_step = (np.arange(n_fl)[np.newaxis, :] != edge_src_fi) & (edge_src_fi < n_fl)
+    step_penalty = np.where(is_step & ~is_dest, ctx.step_penalty_kg, 0.0).astype(FLOAT_DTYPE)
+
     # The main cost function
     total_cost = (
         src_costs[src_idx, np.newaxis, np.newaxis]
         + climb_cost[:, :, np.newaxis]
+        + step_penalty[:, :, np.newaxis]
         + descent_cost[:, :, np.newaxis]
         + cruise_cost
         + contrail_co2e_cost
@@ -699,6 +707,7 @@ def solve_dag(
     takeoff_time: pd.Timestamp,
     met_lookup: EdgeMetLookup | None,
     allow_cooling_credit: bool,
+    step_penalty_kg: float,
     on_wavefront: Callable[[npt.NDArray[np.int64], DAGState], None] | None = None,
 ) -> DAGState:
     """Solve shortest-path DP on the topo-sorted DAG, tracking mass exactly."""
@@ -714,6 +723,7 @@ def solve_dag(
         atyp=atyp,
         cost_index=cost_index,
         eef_cost_factor=eef_cost_factor,
+        step_penalty_kg=step_penalty_kg,
         allow_cooling_credit=allow_cooling_credit,
         origin_elev_ft=origin_elev_ft,
         dest_elev_ft=dest_elev_ft,
@@ -903,7 +913,7 @@ def _relax_transitions(
 ) -> None:
     """Cruise a batch of transitions at every candidate Mach number, pick the best, and relax.
 
-    Each transition carries a manoeuvre with known fuel and time (``fixed_fuel`` and ``fixed_time``:
+    Each transition carries a maneuver with known fuel and time (``fixed_fuel`` and ``fixed_time``:
     a climb at its start over ``lead_dist``, or a final descent at its end over
     ``trail_dist``) plus a level cruise over the rest, whose fuel and time depend on the
     Mach number choice.
@@ -982,7 +992,7 @@ def _step_change(
 ]:
     """Make a step climb or a step descent waypoint by waypoint, reading the weather as it flies.
 
-    A manoeuvre at cruise can take minutes and cover a hundred kilometers, and over that stretch
+    A maneuver at cruise can take minutes and cover a hundred kilometers, and over that stretch
     the heading and the wind both change. For this reason, it's important to use the entire
     step geometry instead of just the geometry at the source node.
 
@@ -1050,7 +1060,7 @@ def _step_change(
         gain = rocd / 60.0 * seg_time
         remaining = tgt_fl - alt
 
-        # A manoeuvre that finishes inside this segment only takes the partial time it needs
+        # A maneuver that finishes inside this segment only takes the partial time it needs
         done = np.abs(gain) >= np.abs(remaining)
         part = np.divide(
             np.abs(remaining) * 60.0,
@@ -1087,7 +1097,7 @@ def _determine_final_descent(
 ]:
     """Reverse the final descent to the destination to determine where it begins.
 
-    The final descent is the longest manoeuvre of the flight (around 200 km and 15-20 minutes),
+    The final descent is the longest maneuver of the flight (around 200 km and 15-20 minutes),
     so it needs the weather along its length. It is computed backwards because the solver needs
     to know where the descent starts, given that it has to finish at the runway. One walk up
     from the destination crosses every candidate flight level in turn, so each level's top of
@@ -1161,6 +1171,7 @@ def solve_track(
     origin_elev_ft: float,
     dest_elev_ft: float,
     allow_cooling_credit: bool,
+    step_penalty_kg: float,
 ) -> DAGState:
     """Solve the vertical profile along a fixed track, choosing the flight level and Mach number.
 
@@ -1272,7 +1283,8 @@ def solve_track(
         # A step down is priced as level cruise at the target FL over the whole span.
         step_down = tgt_fl_2d < src_fl_2d
         lead_dist = np.where(step_down, 0.0, step_dist)
-        lead_fuel = np.where(step_down, 0.0, step_fuel)
+        penalty = np.where(tgt_fl_2d != src_fl_2d, step_penalty_kg, 0.0).astype(FLOAT_DTYPE)
+        lead_fuel = np.where(step_down, 0.0, step_fuel) + penalty
         lead_time = np.where(step_down, 0.0, step_time)
         lead_mass = np.where(step_down, mass_2d, step_mass)
         feasible = feasible | step_down | (tgt_fl_2d == src_fl_2d)
@@ -1676,6 +1688,11 @@ class Optimizer:
     dollar_kg_fuel : float, default 1.0
         Fuel price in US dollars per kg. Only used to convert the carbon cost into the
         fuel-equivalent units of the objective function. Ignored if ``dollar_tonne_co2e`` is 0.0.
+    step_penalty_kg : float, default 0.0
+        Cost in kg of fuel charged for changing flight level, on top of the manoeuvre's own fuel
+        and time, to discourage marginally beneficial steps. The initial climb and final descent
+        are exempt. The penalty enters the objective only, not the aircraft mass, so reported fuel
+        burn stays physical.
     met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
     flight_hours : int or None, default None
@@ -1708,6 +1725,7 @@ class Optimizer:
         cost_index: float = 60.0,
         dollar_tonne_co2e: float = 0.0,
         dollar_kg_fuel: float = 1.0,
+        step_penalty_kg: float = 0.0,
         met_spacing_m: float = 25_000.0,
         flight_hours: int | None = None,
         allow_cooling_credit: bool = False,
@@ -1726,6 +1744,7 @@ class Optimizer:
         self.cost_index = float(cost_index)
         self.dollar_tonne_co2e = float(dollar_tonne_co2e)
         self.dollar_kg_fuel = float(dollar_kg_fuel)
+        self.step_penalty_kg = float(step_penalty_kg)
         self.allow_cooling_credit = allow_cooling_credit
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
@@ -2007,6 +2026,7 @@ class Optimizer:
         aircraft_type: str | None = None,
         payload: float | None = None,
         allow_cooling_credit: bool | None = None,
+        step_penalty_kg: float | None = None,
     ) -> DAGResult:
         """Solve the trajectory optimization via shortest-path dynamic programming on the DAG.
 
@@ -2057,6 +2077,8 @@ class Optimizer:
                     raise ValueError("met must contain 'eef_per_m' when dollar_tonne_co2e is set")
         if allow_cooling_credit is not None:
             self.allow_cooling_credit = allow_cooling_credit
+        if step_penalty_kg is not None:
+            self.step_penalty_kg = float(step_penalty_kg)
         if aircraft_type is not None:
             self.aircraft_type = aircraft_type
             self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
@@ -2105,6 +2127,7 @@ class Optimizer:
                     origin_elev_ft=climb_elev,
                     dest_elev_ft=dest_elev,
                     allow_cooling_credit=self.allow_cooling_credit,
+                    step_penalty_kg=self.step_penalty_kg,
                 )
             else:
                 state = solve_dag(
@@ -2120,6 +2143,7 @@ class Optimizer:
                     takeoff_time=self.takeoff_time,
                     met_lookup=self.met_lookup,
                     allow_cooling_credit=self.allow_cooling_credit,
+                    step_penalty_kg=self.step_penalty_kg,
                 )
             ground_fi = len(self.fl_choices)
             amass_final = state.best_mass[self.dag.h_dest, ground_fi].item()
