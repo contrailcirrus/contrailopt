@@ -380,7 +380,7 @@ def _compute_ground_climbs(
     next_dist, next_fuel, next_time, post_climb_mass, feasible = ps.compute_climb_segment(
         base_alt,
         fl_choices,
-        FLOAT_DTYPE(base_mass),
+        np.full_like(fl_choices, base_mass),
         atyp,
         delta_isa=delta_isa,
         tailwind=tailwind,
@@ -1120,8 +1120,14 @@ def _determine_final_descent(
     time = np.zeros(n_fl, dtype=FLOAT_DTYPE)
     tod_node = np.full(n_fl, -1, dtype=np.int64)
 
-    alt = FLOAT_DTYPE(dest_elev_ft)
-    run_dist = run_fuel = run_time = FLOAT_DTYPE(0.0)
+    alt = dest_elev_ft
+
+    # Altitude only increases below, so a level at or below the starting altitude never gets
+    # crossed and would keep the loop from ever finishing. That happens when the flown descent
+    # is reused and dest_elev_ft is the lowest candidate FL. Such a level needs no descent
+    tod_node[fl_choices <= alt] = h_dest - 1
+
+    run_dist = run_fuel = run_time = 0.0
 
     for j in range(h_dest - 1, -1, -1):
         if (tod_node >= 0).all():
@@ -1210,7 +1216,7 @@ def solve_track(
         if h == dag.h_origin:
             # Nothing can transition backward into the ground slot, so it is always the
             # only active state at the origin
-            src_mass = FLOAT_DTYPE(state.best_mass[h, ground_fi])
+            src_mass = state.best_mass[h, ground_fi].item()
 
             # Below the lowest candidate FL the climb is flown at ISA with no wind, so it is the
             # same for every target and its distance is settled before any weather is read. Fly
@@ -1229,9 +1235,9 @@ def solve_track(
                 fl_choices,
                 atyp,
             )
-            climb_dist = FLOAT_DTYPE(base_dist) + up_dist
-            climb_fuel = FLOAT_DTYPE(base_fuel) + up_fuel
-            climb_time = FLOAT_DTYPE(base_time) + up_time
+            climb_dist = base_dist + up_dist
+            climb_fuel = base_fuel + up_fuel
+            climb_time = base_time + up_time
             feasible = feasible | (fl_choices == fl_choices[0])
             feasible &= arrival != h_dest
             _relax_transitions(
