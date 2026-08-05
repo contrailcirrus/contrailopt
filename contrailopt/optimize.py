@@ -1790,7 +1790,7 @@ class Optimizer:
                 flight_hours=flight_hours,
                 spacing_m=met_spacing_m,
                 eef=eef,
-            )
+            ).aggregate()  # FIXME
         else:
             self.met_lookup = None
 
