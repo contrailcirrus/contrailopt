@@ -939,6 +939,15 @@ class EdgeMetLookup:
         EdgeInterpolation
             Interpolated met fields at the requested sample and time coordinates.
         """
+        if "edge" in self.ds.dims:
+            if "sample" in self.ds.dims:
+                msg = (
+                    "Cannot determine whether meteorology is held at samples or on edges. "
+                    "Ensure that dataset dimensions contain only one of 'sample' or 'edge'."
+                )
+                raise ValueError(msg)
+            sample_idxs = self.edge_idx[sample_idxs]
+
         time_coords = self.ds["time"].values  # (n_time,) datetime64[ns]
         time_s = (time_coords - time_coords[0]) / np.timedelta64(1, "s")
         query_s = (times - time_coords[0]) / np.timedelta64(1, "s")
@@ -966,6 +975,59 @@ class EdgeMetLookup:
             eastward_wind=_lerp("eastward_wind"),
             northward_wind=_lerp("northward_wind"),
             eef_per_m=_lerp("eef_per_m") if "eef_per_m" in self.ds else None,
+        )
+
+    def aggregate(self) -> Self:
+        """Return new EdgeMetLookup with fields aggregated along edges."""
+        # new EdgeMetLookup has just two samples per edge
+        n_edges = self.edge_ptr.size - 1
+
+        sample_lon = np.empty((2 * n_edges), dtype=self.sample_lon.dtype)
+        sample_lon[::2] = self.sample_lon[self.edge_ptr[:-1]]
+        sample_lon[1::2] = self.sample_lon[self.edge_ptr[1:] - 1]
+
+        sample_lat = np.empty((2 * n_edges), dtype=self.sample_lat.dtype)
+        sample_lat[::2] = self.sample_lat[self.edge_ptr[:-1]]
+        sample_lat[1::2] = self.sample_lat[self.edge_ptr[1:] - 1]
+
+        edge_idx = np.repeat(np.arange(n_edges), 2)
+        edge_ptr = np.arange(0, 2 * n_edges + 1, 2)
+
+        src_lon = np.repeat(sample_lon[::2], 2)
+        src_lat = np.repeat(sample_lat[::2], 2)
+        cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
+
+        last = edge_ptr[:-1] - 1
+        delta_dist = np.empty_like(cum_dist)
+        delta_dist[:-1] = np.diff(cum_dist)
+        delta_dist[last] = 0.0
+        sample_azimuth = np.empty_like(cum_dist)
+        sample_azimuth[:-1] = np.deg2rad(
+            geo.azimuth(sample_lon[:-1], sample_lat[:-1], sample_lon[1:], sample_lat[1:])
+        )
+        sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
+
+        # meteorology is stored as a *single* value per edge (distance-weighted mean).
+        # difference from unaggregated meteorology must be handled by __call__
+        ds = xr.Dataset(self.ds.coords).rename(sample="edge")
+        ds["edge"] = np.arange(n_edges)
+        edge_idx_da = xr.DataArray(data=self.edge_idx, coords=self.ds["sample"].coords)
+        delta_dist_da = xr.DataArray(data=self.delta_dist, coords=self.ds["sample"].coords)
+        cum_dist_da = delta_dist_da.groupby(edge_idx_da).sum()
+        for key, var in self.ds.data_vars.items():
+            new_var = (var * delta_dist_da).groupby(edge_idx_da).sum() / cum_dist_da
+            new_var = new_var.rename(group="edge")
+            ds[key] = new_var
+
+        return type(self)(
+            ds=ds,
+            edge_ptr=edge_ptr,
+            edge_idx=edge_idx,
+            sample_lon=sample_lon,
+            sample_lat=sample_lat,
+            cum_dist=cum_dist,
+            delta_dist=delta_dist,
+            sample_azimuth=sample_azimuth,
         )
 
     @classmethod
