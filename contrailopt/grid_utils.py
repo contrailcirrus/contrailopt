@@ -173,41 +173,54 @@ def flight_profile_from_met(
         variables.append("eef_per_m")
     ds = ds[variables]
 
-    # Keep only the hourly steps bracketing the waypoint times
     t = pd.DatetimeIndex(time)
-    usable = pd.DatetimeIndex(ds["time"])
-    keep = (usable >= t.min().floor("1h")) & (usable <= t.max().ceil("1h"))
-    if not keep.any():
-        raise ValueError(
-            f"No met data covers the flight window {t.min()} ... {t.max()}. "
-            f"Available: {usable[0]} ... {usable[-1]}"
-        )
-    ds = ds.isel(time=keep)
+    ds = ds.isel(time=_flight_window_mask(ds, t, "met"))
 
     ds = localize_horizontally(ds, lon, lat)
     ds = to_altitude_ft(ds, altitude_ft)
     ds = bilinear_interp(ds, lon, lat)  # (sample, altitude_ft, time)
 
-    if eef is not None:
-        da_eef = eef.data if isinstance(eef, MetDataArray) else eef
-        ds_eef = _to_ds(da_eef.to_dataset(name="eef_per_m"))
-        ds_eef = ds_eef.isel(time=keep)
-        ds_eef = localize_horizontally(ds_eef, lon, lat)
-        ds_eef = to_altitude_ft(ds_eef, altitude_ft)
-        # Bypass xarray coord alignment - eef altitude_ft may differ slightly from met's
-        ds["eef_per_m"] = (
-            ("sample", "altitude_ft", "time"),
-            bilinear_interp(ds_eef, lon, lat)["eef_per_m"].values,
-        )
-
     profile = _select_waypoint_times(ds, time)
     profile = profile.rename(eastward_wind="u_wind", northward_wind="v_wind")
+
+    if eef is not None:
+        # eef carries its own time and altitude_ft coords, which need not match met's, so
+        # it is collapsed to waypoints independently and merged as raw values
+        da_eef = eef.data if isinstance(eef, MetDataArray) else eef
+        ds_eef = _to_ds(da_eef.to_dataset(name="eef_per_m"))
+        ds_eef = ds_eef.isel(time=_flight_window_mask(ds_eef, t, "eef"))
+        ds_eef = localize_horizontally(ds_eef, lon, lat)
+        ds_eef = to_altitude_ft(ds_eef, altitude_ft)
+        ds_eef = bilinear_interp(ds_eef, lon, lat)
+        profile["eef_per_m"] = (
+            ("waypoint", "altitude_ft"),
+            _select_waypoint_times(ds_eef, time)["eef_per_m"].values,
+        )
 
     return profile.assign_coords(
         longitude=("waypoint", lon),
         latitude=("waypoint", lat),
         time=("waypoint", time),
     )
+
+
+def _flight_window_mask(
+    ds: xr.Dataset,
+    t: pd.DatetimeIndex,
+    name: str,
+) -> npt.NDArray[np.bool_]:
+    """Mask ``ds``'s own time coord down to the hourly steps bracketing ``t``.
+
+    The mask is positional, so it is only valid for the dataset it was built from.
+    """
+    available = pd.DatetimeIndex(ds["time"])
+    keep = (available >= t.min().floor("1h")) & (available <= t.max().ceil("1h"))
+    if not keep.any():
+        raise ValueError(
+            f"No {name} data covers the flight window {t.min()} ... {t.max()}. "
+            f"Available: {available[0]} ... {available[-1]}"
+        )
+    return keep
 
 
 def _select_waypoint_times(
