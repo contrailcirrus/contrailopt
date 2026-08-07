@@ -36,6 +36,7 @@ _SEGMENT_DTYPE = np.dtype(
         ("latitude", FLOAT_DTYPE),
         ("altitude_ft", FLOAT_DTYPE),
         ("elapsed_s", FLOAT_DTYPE),
+        ("cost", FLOAT_DTYPE),
     ]
 )
 
@@ -2283,8 +2284,8 @@ class Optimizer:
 
         edge_dist = geo.haversine(dag.lon[h_src], dag.lat[h_src], dag.lon[h_dst], dag.lat[h_dst])
         n_samp = np.maximum(np.ceil(edge_dist / resample_m).astype(int) + 1, 2)
-        segment_length = edge_dist / (n_samp - 1)
         cum_dist = np.linspace(0.0, edge_dist, n_samp)
+        cost_frac = 1.0 / (n_samp - 1)
 
         if skip_first:
             cum_dist = cum_dist[1:]
@@ -2298,11 +2299,19 @@ class Optimizer:
             cum_dist
         )
 
+        # Apportion costs based on segment length
+        cost = state.best_cost  # cumulative
+        edge_cost = cost[h_dst, fi_dst] - cost[h_src, fi_src]
+        segment_cost = np.full(n_samp, edge_cost * cost_frac)
+        if not skip_first:
+            segment_cost[0] = np.nan
+
         out = np.empty(n_samp, dtype=_SEGMENT_DTYPE)
         out["longitude"] = lon
         out["latitude"] = lat
         out["altitude_ft"] = alt
         out["elapsed_s"] = elapsed
+        out["cost"] = segment_cost
         return out
 
     def _track_waypoints(
@@ -2582,12 +2591,16 @@ class Optimizer:
                 for k in range(len(path_h) - 1)
             ]
             segments = np.concat(resampled)
+
             time = self.takeoff_time + pd.to_timedelta(segments["elapsed_s"], unit="s")
             return Flight(
                 longitude=segments["longitude"],
                 latitude=segments["latitude"],
                 altitude_ft=segments["altitude_ft"],
                 time=time,
+                data={
+                    "cost": segments["cost"],
+                },
                 aircraft_type=self.aircraft_type
             )
 
