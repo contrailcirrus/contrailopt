@@ -1951,6 +1951,15 @@ class Optimizer:
         lon, lat, time = lon_f[sl], lat_f[sl], time_f[sl]
         ds_cruise = ds.isel(waypoint=sl)
 
+        # Drop really short segments that can mess with the optimizer
+        keep = geo.segment_haversine(lon, lat) > 10.0  # drop < 10m segments
+        keep[0] = True
+        keep[-1] = True
+        lon = lon[keep]
+        lat = lat[keep]
+        time = time[keep]
+        ds_cruise = ds_cruise.isel(waypoint=keep)
+
         # The profile path follows a fixed track, so it needs only the ordered timed
         # waypoints, not an edge set -- a Track, not a HorizontalDAG.
         track = Track(lon=lon, lat=lat, node_time=time)
