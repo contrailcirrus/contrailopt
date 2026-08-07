@@ -25,6 +25,7 @@ vis = [
 
 [dependency-groups]
 dev = [
+    "pre-commit",
     "pyarrow",  # test_waypoints writes to parquet
     "pyproj",  # test_slerp
     "pytest",

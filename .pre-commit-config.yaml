@@ -1,0 +1,15 @@
+repos:
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+        args:
+          - --keep-output
+          - --keep-count
+          - --keep-id
+          - --extra-keys=metadata.kernelspec.display_name metadata.language_info.version
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check

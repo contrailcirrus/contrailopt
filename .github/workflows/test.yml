@@ -16,5 +16,5 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: '3.14'
-      - run: uv run --group dev ruff check
+      - run: uv run --group dev pre-commit run --all-files
       - run: uv run --group dev pytest
