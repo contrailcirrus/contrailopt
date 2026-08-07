@@ -900,6 +900,19 @@ class EdgeMetLookup:
         if missing:
             raise ValueError(f"Met dataset missing required variables: {missing}")
 
+    @property
+    def is_aggregated(self) -> bool:
+        """Return True iff meteorology is aggregated on edges."""
+        if "edge" in self.ds.dims:
+            if "sample" in self.ds.dims:
+                msg = (
+                    "Cannot determine whether meteorology is held at samples or on edges. "
+                    "Ensure that dataset dimensions contain only one of 'sample' or 'edge'."
+                )
+                raise ValueError(msg)
+            return True
+        return False
+
     def __repr__(self) -> str:
         n_samples = len(self.edge_idx)
         n_edges = len(self.edge_ptr) - 1
@@ -934,13 +947,7 @@ class EdgeMetLookup:
         EdgeInterpolation
             Interpolated met fields at the requested sample and time coordinates.
         """
-        if "edge" in self.ds.dims:
-            if "sample" in self.ds.dims:
-                msg = (
-                    "Cannot determine whether meteorology is held at samples or on edges. "
-                    "Ensure that dataset dimensions contain only one of 'sample' or 'edge'."
-                )
-                raise ValueError(msg)
+        if self.is_aggregated:
             sample_idxs = self.edge_idx[sample_idxs]
 
         time_coords = self.ds["time"].values  # (n_time,) datetime64[ns]

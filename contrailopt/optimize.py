@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 
 FLOAT_DTYPE = np.float32
 
+_SEGMENT_DTYPE = np.dtype(
+    [
+        ("longitude", FLOAT_DTYPE),
+        ("latitude", FLOAT_DTYPE),
+        ("altitude_ft", FLOAT_DTYPE),
+        ("elapsed_s", FLOAT_DTYPE),
+    ]
+)
+
 _WAYPOINT_DTYPE = np.dtype(
     [
         ("longitude", FLOAT_DTYPE),
@@ -1701,6 +1710,9 @@ class Optimizer:
         burn stays physical.
     met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
+    aggregate_met : bool, default False
+        Aggregate meteorology to hold a single value per edge after sampling based on 
+        ``met_spacing_m``
     flight_hours : int or None, default None
         Upper-bound flight duration in hours for met time window. If None, estimated from
         the aircraft type. Providing an explicit value decouples the met lookup from the
@@ -1733,6 +1745,7 @@ class Optimizer:
         dollar_kg_fuel: float = 1.0,
         step_penalty_kg: float = 0.0,
         met_spacing_m: float = 25_000.0,
+        aggregate_met: bool = False,
         flight_hours: int | None = None,
         allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
@@ -1782,7 +1795,7 @@ class Optimizer:
             flight_hours = flight_hours or estimate_flight_hours(
                 self.origin, self.dest, self.atyp.m_des
             )
-            self.met_lookup = EdgeMetLookup.from_met(
+            met_lookup = EdgeMetLookup.from_met(
                 met=met,
                 dag=self.dag,
                 altitude_ft=self.fl_choices,
@@ -1790,7 +1803,10 @@ class Optimizer:
                 flight_hours=flight_hours,
                 spacing_m=met_spacing_m,
                 eef=eef,
-            ).aggregate()  # FIXME
+            )
+            if aggregate_met:
+                met_lookup = met_lookup.aggregate()
+            self.met_lookup = met_lookup
         else:
             self.met_lookup = None
 
@@ -2251,6 +2267,44 @@ class Optimizer:
 
         return np.array(path_h), np.array(path_fl_idx), np.array(path_mach)
 
+    def _resampled_segments(
+        self,
+        h_src: int,
+        h_dst: int,
+        fi_src: int,
+        fi_dst: int,
+        leg_mach: float,
+        resample_m: float,
+        skip_first: bool,
+    ) -> npt.NDArray[_SEGMENT_DTYPE]:
+        """Emit segments with cost data by resampling a single edge."""
+        state = self.result.state
+        dag = self.dag
+
+        edge_dist = geo.haversine(dag.lon[h_src], dag.lat[h_src], dag.lon[h_dst], dag.lat[h_dst])
+        n_samp = np.maximum(np.ceil(edge_dist / resample_m).astype(int) + 1, 2)
+        segment_length = edge_dist / (n_samp - 1)
+        cum_dist = np.linspace(0.0, edge_dist, n_samp)
+
+        if skip_first:
+            cum_dist = cum_dist[1:]
+            n_samp -= 1
+
+        lon, lat, alt, elapsed, _, _, _, _ = self._resample_edge(
+            h_src,
+            h_dst,
+            fi_src,
+            fi_dst,
+            cum_dist
+        )
+
+        out = np.empty(n_samp, dtype=_SEGMENT_DTYPE)
+        out["longitude"] = lon
+        out["latitude"] = lat
+        out["altitude_ft"] = alt
+        out["elapsed_s"] = elapsed
+        return out
+
     def _track_waypoints(
         self,
         h_src: int,
@@ -2331,16 +2385,10 @@ class Optimizer:
         Returns a structured array with dtype ``_WAYPOINT_DTYPE``.
         """
         met_lookup = self.met_lookup
-        state = self.result.state
         dag = self.dag
-        n_fl = len(self.fl_choices)
-        ground_fi = n_fl
-
-        t_src = state.best_time[h_src, fi_src]
-        t_dst = state.best_time[h_dst, fi_dst]
 
         edge_idx = dag.edge_index(h_src, h_dst)
-        edge_dist = dag.edge_dist[edge_idx]
+        cruise_fi = fi_dst
 
         # Sample range (skip source on subsequent edges to avoid duplication)
         s0 = met_lookup.edge_ptr[edge_idx]
@@ -2351,7 +2399,78 @@ class Optimizer:
         n_samp = len(sample_idxs)
         cum_dist = met_lookup.cum_dist[sample_idxs]
 
-        is_first = fi_src == ground_fi
+        # Resample trajectory
+        lon, lat, alt, elapsed, is_first, is_last, in_climb, in_descent = self._resample_edge(
+            h_src,
+            h_dst,
+            fi_src,
+            fi_dst,
+            cum_dist
+        )
+
+        # Interpolate met
+        times_dt = np.datetime64(self.takeoff_time) + (elapsed * 1e9).astype("timedelta64[ns]")
+        fl_arr = np.array([cruise_fi])
+        interp = met_lookup(sample_idxs, times_dt[:, np.newaxis], fl_idx=fl_arr)
+
+        eef_per_m = (
+            interp.eef_per_m[:, 0]
+            if interp.eef_per_m is not None
+            else np.zeros(n_samp, dtype=FLOAT_DTYPE)
+        )
+
+        out = np.empty(n_samp, dtype=_WAYPOINT_DTYPE)
+        out["longitude"] = lon
+        out["latitude"] = lat
+        out["altitude_ft"] = alt
+        out["elapsed_s"] = elapsed
+        out["mach_number"] = edge_mach
+        if is_first and np.any(in_climb):
+            out["mach_number"][in_climb] = ps.mach_schedule(alt[in_climb], self.atyp)
+        elif not is_first and np.any(in_climb):
+            out["mach_number"][in_climb] = self.atyp.m_des
+        if is_last and np.any(in_descent):
+            out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
+        out["eef_per_m"] = eef_per_m
+        out["air_temperature"] = interp.air_temperature[:, 0]
+        out["eastward_wind"] = interp.eastward_wind[:, 0]
+        out["northward_wind"] = interp.northward_wind[:, 0]
+        out["node_index"] = -1
+        if not skip_first:
+            out["node_index"][0] = h_src
+        out["node_index"][-1] = h_dst
+        out["sample_index"] = sample_idxs
+        return out
+
+    def _resample_edge(
+        self,
+        h_src: int,
+        h_dst: int,
+        fi_src: int,
+        fi_dst: int,
+        cum_dist: npt.NDArray[np.floating]
+    ) -> tuple[
+        npt.NDArray[FLOAT_DTYPE],
+        npt.NDArray[FLOAT_DTYPE],
+        npt.NDArray[FLOAT_DTYPE],
+        npt.NDArray[FLOAT_DTYPE],
+        bool,
+        bool,
+        npt.NDArray[np.bool],
+        npt.NDArray[np.bool]
+    ]:
+        """Resample trajectory at specified cumulative distances along an edge."""
+        state = self.result.state
+        dag = self.dag
+
+        edge_idx = dag.edge_index(h_src, h_dst)
+        edge_dist = dag.edge_dist[edge_idx]
+        n_samp = cum_dist.size
+
+        t_src = state.best_time[h_src, fi_src]
+        t_dst = state.best_time[h_dst, fi_dst]
+
+        is_first = fi_src == len(self.fl_choices)
         is_last = h_dst == self.dag.h_dest
         cruise_fi = fi_dst
         cruise_fl = self.fl_choices[cruise_fi]
@@ -2407,47 +2526,39 @@ class Optimizer:
             dfrac = (cum_dist[in_descent] - descent_start) / descent_dist
             elapsed[in_descent] = t_src + climb_time_s + cruise_time + descent_time * dfrac
 
-        # --- Met interpolation ---
-        times_dt = np.datetime64(self.takeoff_time) + (elapsed * 1e9).astype("timedelta64[ns]")
-        fl_arr = np.array([cruise_fi])
-        interp = met_lookup(sample_idxs, times_dt[:, np.newaxis], fl_idx=fl_arr)
-
-        eef_per_m = (
-            interp.eef_per_m[:, 0]
-            if interp.eef_per_m is not None
-            else np.zeros(n_samp, dtype=FLOAT_DTYPE)
+        # --- Horizontal trajectory ---
+        lon, lat = slerp.gc_interp(
+            dag.lon[h_src],
+            dag.lat[h_src],
+            dag.lon[h_dst],
+            dag.lat[h_dst],
+            cum_dist / edge_dist
         )
 
-        out = np.empty(n_samp, dtype=_WAYPOINT_DTYPE)
-        out["longitude"] = met_lookup.sample_lon[sample_idxs]
-        out["latitude"] = met_lookup.sample_lat[sample_idxs]
-        out["altitude_ft"] = alt
-        out["elapsed_s"] = elapsed
-        out["mach_number"] = edge_mach
-        if is_first and np.any(in_climb):
-            out["mach_number"][in_climb] = ps.mach_schedule(alt[in_climb], self.atyp)
-        elif not is_first and np.any(in_climb):
-            out["mach_number"][in_climb] = self.atyp.m_des
-        if is_last and np.any(in_descent):
-            out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
-        out["eef_per_m"] = eef_per_m
-        out["air_temperature"] = interp.air_temperature[:, 0]
-        out["eastward_wind"] = interp.eastward_wind[:, 0]
-        out["northward_wind"] = interp.northward_wind[:, 0]
-        out["node_index"] = -1
-        if not skip_first:
-            out["node_index"][0] = h_src
-        out["node_index"][-1] = h_dst
-        out["sample_index"] = sample_idxs
-        return out
+        return (
+            lon.astype(FLOAT_DTYPE),
+            lat.astype(FLOAT_DTYPE),
+            alt,
+            elapsed,
+            is_first,
+            is_last,
+            in_climb,
+            in_descent,
+        )
 
-    def to_flight(self) -> Flight:
+
+    def to_flight(self, resample_m: float | None = None) -> Flight:
         """Return the optimal trajectory as a `pycontrails.Flight`.
 
         When met data is available, waypoints are emitted at each edge sample
         point (~20 km spacing) with proper climb/descent altitude profiles and
         per-sample ``eef_per_m``. Without met, falls back to one waypoint per
         DAG node.
+
+        If ``resample_m`` is provided, the flight is resampled so that no waypoints
+        are separated by more then ``resample_m``. No meteorology is attached to
+        resampled flights, but per-segment cost, fuel burn, and ef (if provided)
+        are attached with incoming-leg semantics.
 
         The ``solve()`` method must be called first.
         """
@@ -2456,6 +2567,29 @@ class Optimizer:
         dag = self.dag
         n_fl = len(self.fl_choices)
         ground_fi = n_fl
+
+        if resample_m is not None:
+            resampled = [
+                self._resampled_segments(
+                    path_h[k],
+                    path_h[k + 1],
+                    path_fl_idx[k],
+                    path_fl_idx[k + 1],
+                    path_mach[k + 1],
+                    resample_m,
+                    skip_first=(k > 0)
+                )
+                for k in range(len(path_h) - 1)
+            ]
+            segments = np.concat(resampled)
+            time = self.takeoff_time + pd.to_timedelta(segments["elapsed_s"], unit="s")
+            return Flight(
+                longitude=segments["longitude"],
+                latitude=segments["latitude"],
+                altitude_ft=segments["altitude_ft"],
+                time=time,
+                aircraft_type=self.aircraft_type
+            )
 
         if self.met_lookup is None and self.profile_ds is None:
             # No met at all: one waypoint per node, ISA-only solve.
