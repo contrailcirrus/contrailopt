@@ -2690,7 +2690,11 @@ class Optimizer:
         ax.set_title(title)
         return ax
 
-    def animate_solve(self, display_fl_idx: int | None = None) -> "FuncAnimation":
+    def animate_solve(
+        self,
+        display_fl_idx: int | None = None,
+        ax: "GeoAxes | None" = None,
+    ) -> "FuncAnimation":
         """Re-run the DP with converged mass and return a wavefront animation.
 
         ``solve()`` must be called first. This re-runs a single ``solve_dag``
@@ -2702,9 +2706,11 @@ class Optimizer:
 
         Parameters
         ----------
-        display_fl_idx : int or None
+        display_fl_idx : int | None
             FL index into ``fl_choices`` to display costs for. If *None*,
             uses the FL the optimal path spends the most legs at.
+        ax : GeoAxes | None
+            Cartopy GeoAxes to draw on. If *None*, a new figure is created.
 
         Returns
         -------
@@ -2753,6 +2759,7 @@ class Optimizer:
             takeoff_time=self.takeoff_time,
             met_lookup=self.met_lookup,
             allow_cooling_credit=self.allow_cooling_credit,
+            step_penalty_kg=self.step_penalty_kg,
             on_wavefront=capture,
         )
 
@@ -2774,7 +2781,9 @@ class Optimizer:
 
         # Build animation on top of the DAG map
         pc = ccrs.PlateCarree()
-        fig, ax = plt.subplots(figsize=(24, 12), subplot_kw={"projection": pc})
+        if ax is None:
+            _, ax = plt.subplots(figsize=(24, 12), subplot_kw={"projection": pc})
+        fig = ax.get_figure()
         dag.plot(ax=ax, show_edges=False)
 
         # Draw avoidance regions (densify edges along geodesics)

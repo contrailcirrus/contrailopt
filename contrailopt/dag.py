@@ -518,7 +518,7 @@ class HorizontalDAG:
         if ax is None:
             central_lon = 180.0 if self.crosses_antimeridian else 0.0
             proj = ccrs.PlateCarree(central_longitude=central_lon)
-            _, ax = plt.subplots(figsize=(20, 10), subplot_kw={"projection": proj})
+            _, ax = plt.subplots(subplot_kw={"projection": proj})
 
             ax.set_extent(
                 [
@@ -784,7 +784,7 @@ class Track:
         if ax is None:
             central_lon = 180.0 if self.crosses_antimeridian else 0.0
             proj = ccrs.PlateCarree(central_longitude=central_lon)
-            _, ax = plt.subplots(figsize=(20, 10), subplot_kw={"projection": proj})
+            _, ax = plt.subplots(subplot_kw={"projection": proj})
             ax.set_extent(
                 [
                     self.lon.min() - 2.0,
