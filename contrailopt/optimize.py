@@ -40,6 +40,8 @@ _SEGMENT_DTYPE = np.dtype(
         ("altitude_ft", FLOAT_DTYPE),
         ("elapsed_s", FLOAT_DTYPE),
         ("cost", FLOAT_DTYPE),
+        ("fuel", FLOAT_DTYPE),
+        ("eef", FLOAT_DTYPE),
     ]
 )
 
@@ -345,6 +347,7 @@ class DAGState:
     best_mass: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival mass at each state
     best_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival time in seconds from takeoff
     best_mach: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) incoming cruise mach
+    best_eef : npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) cruise EEF on incoming edge
     best_climb_dist: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb distance on incoming edge
     best_climb_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb time on incoming edge
     best_prev_h: npt.NDArray[np.int64]  # (n_h, n_fl) previous horizontal node, -1 = no predecessor
@@ -358,6 +361,7 @@ class DAGState:
             best_mass=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_mach=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
+            best_eef=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_climb_dist=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_climb_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_prev_h=np.full((n_h, n_cols), -1, dtype=np.int64),
@@ -753,6 +757,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     state.best_mass[flat_nbr[wi], wj] = arrival_mass[wi, wj]
     state.best_time[flat_nbr[wi], wj] = arrival_time[wi, wj]
     state.best_mach[flat_nbr[wi], wj] = best_mach[wi, wj]
+    state.best_eef[flat_nbr[wi], wj] = cruise_eef[wi, wj]
     state.best_climb_dist[flat_nbr[wi], wj] = climb_dist[wi, wj]
     state.best_climb_time[flat_nbr[wi], wj] = climb_time[wi, wj]
     state.best_prev_h[flat_nbr[wi], wj] = h_idxs[src_idx[wi]]
@@ -2378,13 +2383,14 @@ class Optimizer:
         skip_first: bool,
     ) -> npt.NDArray[_SEGMENT_DTYPE]:
         """Emit segments with cost data by resampling a single edge."""
+        met_lookup = self.met_lookup
         state = self.result.state
         dag = self.dag
 
         edge_dist = geo.haversine(dag.lon[h_src], dag.lat[h_src], dag.lon[h_dst], dag.lat[h_dst])
         n_samp = np.maximum(np.ceil(edge_dist / resample_m).astype(int) + 1, 2)
         cum_dist = np.linspace(0.0, edge_dist, n_samp)
-        cost_frac = 1.0 / (n_samp - 1)
+        segment_frac = 1.0 / (n_samp - 1)
 
         if skip_first:
             cum_dist = cum_dist[1:]
@@ -2400,10 +2406,18 @@ class Optimizer:
 
         # Apportion costs based on segment length
         cost = state.best_cost  # cumulative
+        mass = state.best_mass
+        eef = state.best_eef
         edge_cost = cost[h_dst, fi_dst] - cost[h_src, fi_src]
-        segment_cost = np.full(n_samp, edge_cost * cost_frac)
+        edge_fuel = mass[h_src, fi_src] - mass[h_dst, fi_dst]
+        edge_eef = eef[h_dst, fi_dst]
+        segment_cost = np.full(n_samp, edge_cost * segment_frac)
+        segment_fuel = np.full(n_samp, edge_fuel * segment_frac)
+        segment_eef = np.full(n_samp, edge_eef * segment_frac)
         if not skip_first:
             segment_cost[0] = np.nan
+            segment_fuel[0] = np.nan
+            segment_eef[0] = np.nan
 
         out = np.empty(n_samp, dtype=_SEGMENT_DTYPE)
         out["longitude"] = lon
@@ -2411,6 +2425,8 @@ class Optimizer:
         out["altitude_ft"] = alt
         out["elapsed_s"] = elapsed
         out["cost"] = segment_cost
+        out["fuel"] = segment_fuel
+        out["eef"] = segment_eef
         return out
 
     def _track_waypoints(
@@ -2698,6 +2714,8 @@ class Optimizer:
                 time=time,
                 data={
                     "cost": segments["cost"],
+                    "fuel": segments["fuel"],
+                    "eef": segments["eef"],
                 },
                 aircraft_type=self.aircraft_type
             )
