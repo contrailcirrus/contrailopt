@@ -13,8 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: '3.14'
+          cache-suffix: test
+
       - run: uv run --group dev pre-commit run --all-files
+
       - run: uv run --group dev pytest
