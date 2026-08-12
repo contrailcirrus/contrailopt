@@ -36,6 +36,17 @@ docs = [
     "myst-nb",
     "sphinx",
 ]
+notebooks = [
+    "cartopy",
+    "gcsfs",
+    "ipykernel",
+    "matplotlib",
+    "nbmake",
+    "pyarrow",
+    "pycontrails[ecmwf]",
+    "pytest",
+    "zarr",
+]
 
 [build-system]
 requires = ["setuptools>=77", "setuptools-scm"]

@@ -1,0 +1,31 @@
+name: Notebooks
+
+on:
+  pull_request:
+
+  workflow_dispatch:
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: '3.14'
+          cache-suffix: notebooks
+
+      # Restore cached ERA5 and Google Contrail Forecasts
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pycontrails
+          key: pycontrails-${{ hashFiles('docs/notebooks/*.ipynb') }}
+          restore-keys: pycontrails-
+
+      - env:
+          CONTRAILS_API_KEY: ${{ secrets.CONTRAILS_BASIC_API_KEY }}
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: uv run --group notebooks pytest --nbmake --nbmake-timeout=3000 docs/notebooks
