@@ -25,7 +25,7 @@ jobs:
           restore-keys: pycontrails-
 
       - env:
-          CONTRAILS_API_KEY: ${{ secrets.CONTRAILS_BASIC_API_KEY }}
+          CONTRAILS_API_KEY: ${{ secrets.CONTRAILS_API_KEY }}
           CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: uv run --group notebooks pytest --nbmake --nbmake-timeout=3000 docs/notebooks
