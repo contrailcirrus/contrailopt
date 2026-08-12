@@ -12,7 +12,7 @@ Aircraft performance is modeled with the [Poll–Schumann (PS) model](https://do
 pip install -e .
 ```
 
- or another compatible tool such as [uv](https://docs.astral.sh/uv/):
+or another compatible tool such as [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync

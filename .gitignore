@@ -4,3 +4,8 @@ _version.py
 .vscode
 *.zarr
 debug*
+.venv
+.pytest_cache
+.ruff_cache
+docs/_build
+docs/api

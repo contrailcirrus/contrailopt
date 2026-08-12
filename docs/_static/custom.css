@@ -1,0 +1,36 @@
+.cell_output .output.text_html {
+  overflow-x: auto;
+}
+
+.cell_output table {
+  color: var(--color-content-foreground);
+  border-collapse: collapse;
+  border-spacing: 0;
+  border: none;
+  font-size: 12px;
+  table-layout: fixed;
+}
+
+.cell_output table thead {
+  border-bottom: 1px solid var(--color-foreground-border);
+  vertical-align: bottom;
+}
+
+.cell_output table tr,
+.cell_output table th,
+.cell_output table td {
+  text-align: right;
+  vertical-align: middle;
+  padding: 0.5em 0.5em;
+  line-height: normal;
+  white-space: normal;
+  border: none;
+}
+
+.cell_output table th {
+  font-weight: bold;
+}
+
+.cell_output table tbody tr:nth-child(odd) {
+  background: var(--color-background-secondary);
+}
