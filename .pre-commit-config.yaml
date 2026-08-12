@@ -7,7 +7,7 @@ repos:
           - --keep-output
           - --keep-count
           - --keep-id
-          - --extra-keys=metadata.kernelspec.display_name metadata.language_info.version
+          - --extra-keys=metadata.kernelspec metadata.language_info.version
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.2
