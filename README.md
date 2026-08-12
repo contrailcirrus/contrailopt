@@ -6,17 +6,31 @@ Aircraft performance is modeled with the [Poll–Schumann (PS) model](https://do
 
 ## Installation
 
-Install with `pip` or another compatible tool such as [uv](https://docs.astral.sh/uv/):
+`contrailopt` is not yet published on PyPI. Clone the repository and install from source with `pip`:
 
 ```bash
 pip install -e .
 ```
 
-## Development
-
-Install the dev dependencies (`pip install --group dev`), then run the linter and test suite:
+ or another compatible tool such as [uv](https://docs.astral.sh/uv/):
 
 ```bash
-ruff check
-pytest
+uv sync
+```
+
+## Development
+
+Run the linter and test suite with the `dev` dependency group, as the GitHub CI does:
+
+```bash
+uv run --group dev pre-commit run --all-files
+uv run --group dev pytest
+```
+
+## Documentation
+
+Build the docs with the `docs` dependency group:
+
+```bash
+uv run --group docs sphinx-build docs docs/_build/html
 ```
