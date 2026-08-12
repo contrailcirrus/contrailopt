@@ -27,5 +27,6 @@ jobs:
       - env:
           CONTRAILS_API_KEY: ${{ secrets.CONTRAILS_API_KEY }}
           CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+          CDSAPI_URL: 'https://cds.climate.copernicus.eu/api'
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: uv run --group notebooks pytest --nbmake --nbmake-timeout=3000 docs/notebooks
