@@ -2451,7 +2451,7 @@ class Optimizer:
         return out
 
     def to_flight(self) -> Flight:
-        """Return the optimal trajectory as a `pycontrails.Flight`.
+        """Return the optimal trajectory as a :class:`pycontrails.Flight`.
 
         When met data is available, waypoints are emitted at each edge sample
         point (~20 km spacing) with proper climb/descent altitude profiles and
@@ -2583,7 +2583,7 @@ class Optimizer:
         """Plot met data on DAG nodes for a given flight level and time.
 
         Draws a wind quiver overlay. When ``eef_per_m`` is available in the
-        met lookup, also draws a scatter plot colored by EEF.
+        :attr:`met_lookup`, also draws a scatter plot colored by EEF.
 
         Parameters
         ----------
@@ -2697,7 +2697,7 @@ class Optimizer:
     ) -> "FuncAnimation":
         """Re-run the DP with converged mass and return a wavefront animation.
 
-        ``solve()`` must be called first. This re-runs a single ``solve_dag``
+        :meth:`solve` must be called first. This re-runs a single ``solve_dag``
         pass with the converged ``amass_init``, capturing wavefront snapshots.
         Nodes are colored by ``best_cost[:, display_fl_idx]`` for a single FL.
         Edges whose source node has been processed are shown in blue;

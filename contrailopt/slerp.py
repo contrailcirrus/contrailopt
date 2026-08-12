@@ -1,13 +1,16 @@
 """Spherical geometry helpers using SLERP (Spherical Linear intERPolation).
 
-https://en.wikipedia.org/wiki/Spherical_linear_interpolation
+See `Spherical linear interpolation
+<https://en.wikipedia.org/wiki/Spherical_linear_interpolation>`_.
 
-These are rougher than pyproj in that they model Earth as a perfect sphere rather than
-a WGS84 ellipsoid but significantly faster for vectorized numpy operations.
+These are rougher than pyproj in that they model Earth as a perfect sphere of radius
+:data:`pycontrails.physics.constants.radius_earth` rather than a WGS84 ellipsoid but
+significantly faster for vectorized numpy operations.
 
-The pycontrails library already includes ``geo.haversine`` and ``geo.azimuth``
-functions for computing great circle distances and azimuths. The functions here extend
-those utilities with forward projection and interpolation capabilities.
+The pycontrails library already includes :func:`pycontrails.physics.geo.haversine` and
+:func:`pycontrails.physics.geo.azimuth` functions for computing great circle distances
+and azimuths. The functions here extend those utilities with forward projection and
+interpolation capabilities.
 """
 
 import numpy as np
@@ -23,7 +26,7 @@ def spherical_fwd(
 ) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     r"""Project from ``(lon, lat)`` along azimuth ``az`` by ``dist`` meters on a sphere.
 
-    Equivalent to ``lon2, lat2, _ = geod.fwd(lon, lat, az, dist)``.
+    Equivalent to :meth:`pyproj.Geod.fwd`, which returns ``lon2, lat2, _``.
 
     Parameters
     ----------
@@ -38,8 +41,10 @@ def spherical_fwd(
 
     Returns
     -------
-    tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]
-        Longitude and latitude of projected point, [:math:`\deg`].
+    lon2 : npt.NDArray[np.floating]
+        Longitude of projected point, [:math:`\deg`].
+    lat2 : npt.NDArray[np.floating]
+        Latitude of projected point, [:math:`\deg`].
     """
     lonr = np.deg2rad(lon)
     latr = np.deg2rad(lat)
@@ -68,8 +73,8 @@ def gc_interp(
 ) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     r"""Interpolate along great circles via SLERP.
 
-    Equivalent to ``geod.fwd(lon1, lat1, az, frac * dist)`` but without
-    requiring a separate ``geod.inv`` call to obtain ``az`` and ``dist``.
+    Equivalent to :meth:`pyproj.Geod.fwd` evaluated at ``frac * dist``, but without
+    the separate :meth:`pyproj.Geod.inv` call to obtain ``az`` and ``dist``.
 
     Parameters
     ----------
@@ -86,8 +91,10 @@ def gc_interp(
 
     Returns
     -------
-    tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]
-        Interpolated longitude and latitude, [:math:`\deg`].
+    lon : npt.NDArray[np.floating]
+        Interpolated longitude, [:math:`\deg`].
+    lat : npt.NDArray[np.floating]
+        Interpolated latitude, [:math:`\deg`].
     """
     lon1r = np.deg2rad(lon1)
     lat1r = np.deg2rad(lat1)
@@ -125,8 +132,7 @@ def gc_npts(
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     r"""Return n equally-spaced intermediate points along a great circle.
 
-    Excludes the endpoints themselves. Equivalent to
-    ``geod.npts(lon1, lat1, lon2, lat2, n)``.
+    Excludes the endpoints themselves. Equivalent to :meth:`pyproj.Geod.npts`.
 
     Parameters
     ----------
@@ -143,9 +149,10 @@ def gc_npts(
 
     Returns
     -------
-    tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
-        Longitude and latitude of intermediate points, [:math:`\deg`].
-        These arrays always have dtype ``np.float64``.
+    lon : npt.NDArray[np.float64]
+        Longitude of intermediate points, [:math:`\deg`]. Always ``np.float64``.
+    lat : npt.NDArray[np.float64]
+        Latitude of intermediate points, [:math:`\deg`]. Always ``np.float64``.
     """
     frac = np.linspace(0.0, 1.0, n + 2, dtype=np.float64)[1:-1]
     return gc_interp(lon1, lat1, lon2, lat2, frac)
