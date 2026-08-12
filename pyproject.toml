@@ -31,6 +31,11 @@ dev = [
     "pytest",
     "ruff",
 ]
+docs = [
+    "furo",
+    "myst-nb",
+    "sphinx",
+]
 
 [build-system]
 requires = ["setuptools>=77", "setuptools-scm"]
