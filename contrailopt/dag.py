@@ -1000,7 +1000,7 @@ class EdgeMetLookup:
             If provided, EEF is interpolated onto sample points independently from the
             weather grid, avoiding the need to pre-merge onto a common grid.
             Takes precedence over "eef_per_m" in ``met`` if both are present.
-            Assumed to adhere to pycontrails ``MetDataArray`` conventions.
+            Assumed to adhere to pycontrails :class:`MetDataArray` conventions.
 
         Returns
         -------

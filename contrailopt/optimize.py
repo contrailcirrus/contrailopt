@@ -136,6 +136,38 @@ def _cruise_zone_weights(
     return np.divide(overlap, seg_dist, out=np.zeros_like(overlap), where=seg_dist > 0.0)
 
 
+def _climbing_fl_idxs(
+    dist: npt.NDArray[FLOAT_DTYPE],
+    climb_dist: npt.NDArray[FLOAT_DTYPE],
+    src_alt_ft: npt.NDArray[FLOAT_DTYPE],
+    tgt_alt_ft: npt.NDArray[FLOAT_DTYPE],
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+) -> npt.NDArray[np.int64]:
+    """Find the flight level closest to the aircraft's altitude partway through a climb.
+
+    This function assumes the altitude increases linearly over the climb.
+
+    Returns
+    -------
+    npt.NDArray[np.int64]
+        Index into ``fl_choices``, shaped like the broadcast of the other arguments.
+    """
+    climbed = np.divide(
+        dist,
+        climb_dist,
+        out=np.ones_like(climb_dist),
+        where=climb_dist > 0.0,
+    )
+    np.minimum(climbed, 1.0, out=climbed)  # hold the target level beyond the climb
+    altitude_ft = src_alt_ft + (tgt_alt_ft - src_alt_ft) * climbed
+
+    upper = np.clip(np.searchsorted(fl_choices, altitude_ft), 1, len(fl_choices) - 1)
+    lower = upper - 1
+    below = altitude_ft - fl_choices[lower] <= fl_choices[upper] - altitude_ft
+
+    return np.where(below, lower, upper)
+
+
 def _calculate_cruise_at_samples(
     met_lookup: EdgeMetLookup,
     flat_edge_idx: npt.NDArray[np.int64],
@@ -150,6 +182,7 @@ def _calculate_cruise_at_samples(
     climb_dist: npt.NDArray[FLOAT_DTYPE],
     descent_dd: npt.NDArray[FLOAT_DTYPE],
     flat_dist: npt.NDArray[FLOAT_DTYPE],
+    src_alt_ft: npt.NDArray[FLOAT_DTYPE],
 ) -> tuple[
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
@@ -197,6 +230,9 @@ def _calculate_cruise_at_samples(
         Descent distance deducted from edge length. Shape ``(n_edge, n_fl)``.
     flat_dist : npt.NDArray[FLOAT_DTYPE]
         Total edge distance. Shape ``(n_edge,)``.
+    src_alt_ft : npt.NDArray[FLOAT_DTYPE]
+        Altitude at which each edge starts (the source FL, or the airport elevation
+        for edges leaving the origin). Shape ``(n_edge,)``.
 
     Returns
     -------
@@ -272,7 +308,15 @@ def _calculate_cruise_at_samples(
 
     # Accumulate eef_per_m over the full edge (no cruise zone weighting)
     if sample_met.eef_per_m is not None:
-        seg_eef = sample_met.eef_per_m * seg_dist[:, np.newaxis]
+        sample_fi = _climbing_fl_idxs(
+            met_lookup.cum_dist[sample_idxs][:, np.newaxis],
+            climb_dist[sample_to_edge],
+            src_alt_ft[sample_to_edge][:, np.newaxis],
+            fl_choices[np.newaxis, :],
+            fl_choices,
+        )
+        eef_per_m = np.take_along_axis(sample_met.eef_per_m, sample_fi, axis=1)
+        seg_eef = eef_per_m * seg_dist[:, np.newaxis]
         cruise_eef = np.add.reduceat(seg_eef, edge_bounds, axis=0)
     else:
         cruise_eef = np.zeros((1, 1), dtype=FLOAT_DTYPE)
@@ -592,6 +636,10 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
 
     climb_cost = ctx.cost_index / 60.0 * climb_time + climb_fuel
 
+    # The ground slot sits one past the FLs, so append the airport elevation to index it
+    alt_by_fi = np.append(fl_choices, ctx.origin_elev_ft).astype(FLOAT_DTYPE)
+    src_alt_ft = alt_by_fi[fl_idxs[src_idx]]
+
     # Descent: ground descent if neighbor is destination.
     # FL-to-FL step-downs are treated as part of cruise (mild thrust reduction at cruise Mach,
     # negligible extra distance or time vs. level flight).
@@ -617,6 +665,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             climb_dist,
             descent_dd,
             flat_dist,
+            src_alt_ft,
         )
     else:
         cruise_fuel, cruise_time, cruise_feasible = _isa_cruise(
@@ -823,6 +872,7 @@ def _track_cruise(
     mass: npt.NDArray[FLOAT_DTYPE],
     lead_dist: npt.NDArray[FLOAT_DTYPE],
     trail_dist: npt.NDArray[FLOAT_DTYPE],
+    src_alt_ft: npt.NDArray[FLOAT_DTYPE],
     atyp: ps_aircraft_params.PSAircraftEngineParams,
 ) -> tuple[
     npt.NDArray[FLOAT_DTYPE],
@@ -885,7 +935,10 @@ def _track_cruise(
     if pa.eef_per_m is None:
         eef = np.zeros(len(start), dtype=FLOAT_DTYPE)
     else:
-        eef = np.add.reduceat(pa.eef_per_m[node, fli] * delta, bounds)
+        sample_fli = _climbing_fl_idxs(
+            x_lo, lead_dist[tr], src_alt_ft[tr], fl_choices[fli], fl_choices
+        )
+        eef = np.add.reduceat(pa.eef_per_m[node, sample_fli] * delta, bounds)
 
     return cruise_fuel, cruise_time, eef, feasible
 
@@ -922,6 +975,10 @@ def _relax_transitions(
     Mach number choice.
     """
     n = len(target_fi)
+
+    # The ground slot sits one past the FLs
+    src_alt_ft = np.append(fl_choices, fl_choices[0])[src_fi]
+
     cruise_fuel, cruise_time, eef, feasible_m = _track_cruise(
         pa,
         np.full(n, h, dtype=np.int64),
@@ -932,6 +989,7 @@ def _relax_transitions(
         cruise_mass,
         lead_dist,
         trail_dist,
+        src_alt_ft,
         atyp,
     )
 
