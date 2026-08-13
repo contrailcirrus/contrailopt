@@ -66,12 +66,10 @@ napoleon_type_aliases = {
     "Flight": "pycontrails.Flight",
     "MetDataArray": "pycontrails.MetDataArray",
     "MetDataset": "pycontrails.MetDataset",
-    "GeoAxes": "cartopy.mpl.geoaxes.GeoAxes",
     "FuncAnimation": "matplotlib.animation.FuncAnimation",
 }
 
 intersphinx_mapping = {
-    "cartopy": ("https://scitools.org.uk/cartopy/docs/v0.25/", None),
     "matplotlib": ("https://matplotlib.org/stable/", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
     "pandas": ("https://pandas.pydata.org/pandas-docs/dev/", None),

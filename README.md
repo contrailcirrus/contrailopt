@@ -32,5 +32,5 @@ uv run --group dev pytest
 Build the docs with the `docs` dependency group:
 
 ```bash
-uv run --group docs sphinx-build docs docs/_build/html
+uv run --group docs sphinx-build -W docs docs/_build/html
 ```
