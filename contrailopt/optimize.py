@@ -1,4 +1,7 @@
-"""Trajectory optimization with Poll-Schumann Aircraft Performance and climate term."""
+"""Trajectory optimization with Poll-Schumann Aircraft Performance and climate term.
+
+See :class:`Optimizer` for the main entrypoint.
+"""
 
 import itertools
 from collections.abc import Callable
@@ -436,7 +439,7 @@ def _compute_edge_climbs(
         Aircraft/engine parameters.
     takeoff_time : pd.Timestamp
         Flight departure time.
-    met_lookup : EdgeMetLookup or None
+    met_lookup : EdgeMetLookup | None
         Met interpolator. If None, ISA + zero wind is used.
 
     Returns
@@ -710,7 +713,7 @@ def solve_dag(
     step_penalty_kg: float,
     on_wavefront: Callable[[npt.NDArray[np.int64], DAGState], None] | None = None,
 ) -> DAGState:
-    """Solve shortest-path DP on the topo-sorted DAG, tracking mass exactly."""
+    """Solve shortest-path DP on the :class:`HorizontalDAG`, tracking mass exactly."""
     fl_choices = fl_choices.astype(FLOAT_DTYPE, copy=False)
     mach_choices = mach_choices.astype(FLOAT_DTYPE, copy=False)
 
@@ -1438,9 +1441,9 @@ def estimate_flight_hours(
     mach_number: float = 0.75,
     max_headwind: float = 40.0,
 ) -> int:
-    """Estimate upper-bound flight duration in hours.
+    """Estimate an upper-bound for flight duration in hours.
 
-    Computes the worst-case flight time assuming the aircraft flies at
+    This function computes the worst-case flight time assuming the aircraft flies at
     ``mach_number`` at FL400 with a sustained headwind of ``max_headwind``.
 
     Parameters
@@ -1450,7 +1453,7 @@ def estimate_flight_hours(
     dest : AirportCoords
         Destination airport.
     mach_number : float, default 0.75
-        Cruise Mach number. Use the slowest aircraft's design Mach minus a margin.
+        Cruise Mach number. Suggest using the aircraft's design Mach number minus a margin.
     max_headwind : float, default 40.0
         Assumed maximum sustained headwind in m/s.
 
@@ -1550,9 +1553,10 @@ def cruise_flight_levels(
 ) -> npt.NDArray[FLOAT_DTYPE]:
     """Determine the candidate cruise flight levels for a given origin-destination pair.
 
-    This function applies the common eastbound/westbound FL rules of even FLs for westbound
-    flights and odd FLs for eastbound flights. There is not per-aircraft-type ceiling
-    applied (this could be added if needed).
+    This function applies the common eastbound/westbound flight levels rules of even flight
+    levels for westbound flights and odd flight levels for eastbound flights.
+
+    There is not per-aircraft-type ceiling applied.
 
     Parameters
     ----------
@@ -1657,11 +1661,15 @@ def _check_airport_agreement(
 
 
 class Optimizer:
-    """Trajectory optimizer for a single origin-destination pair based on the PS model.
+    """Trajectory optimizer based on the PS model with optional climate cost function.
 
     The optimizer builds a horizontal directed acyclic graph between two airports,
     optionally interpolates met data onto edge sample points, and solves for the minimum-cost
-    path across valid flight levels and Mach numbers.
+    path across candidate flight levels and Mach numbers with :func:`solve_dag`.
+
+    An instance built with :meth:`from_flight` instead holds the lateral path fixed to a flown
+    trajectory and optimizes only the vertical profile and Mach number with :func:`solve_track`.
+    The :attr:`kind` property reports which of the two variants an instance is.
 
     Parameters
     ----------
@@ -1681,9 +1689,12 @@ class Optimizer:
         EEF is interpolated onto sample points independently from the weather grid, avoiding
         the need to pre-merge onto a common grid. Takes precedence over ``eef_per_m`` in
         ``met`` if both are present. Assumed to adhere to pycontrails ``MetDataArray`` conventions.
-    dag : HorizontalDAG or None, default None
-        Pre-built DAG. If *None*, a DAG is generated via Poisson-disk sampling along the
-        great circle. The DAG origin and destination must agree with the airport coordinates.
+    dag : HorizontalDAG | Track | None, default None
+        Pre-built graph. If *None*, a ``HorizontalDAG`` is generated via Poisson-disk sampling
+        along the great circle. A supplied ``HorizontalDAG`` must have origin and destination
+        nodes agreeing with the airport coordinates. A ``Track`` is a fixed sequence of timed
+        waypoints with mid-air endpoints, normally supplied by :meth:`from_flight` rather
+        than directly.
     cost_index : float, default 60.0
         Fuel-vs-time tradeoff in kg per minute. Higher values penalize time more,
         favoring faster (and more fuel-intensive) routes.
@@ -1701,7 +1712,7 @@ class Optimizer:
         burn stays physical.
     met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
-    flight_hours : int or None, default None
+    flight_hours : int | None, default None
         Upper-bound flight duration in hours for met time window. If None, estimated from
         the aircraft type. Providing an explicit value decouples the met lookup from the
         aircraft, allowing the user to call the ``solve()`` method with a different aircraft
@@ -1710,12 +1721,16 @@ class Optimizer:
         If True, negative EEF (cooling contrails) reduces cost when ``dollar_tonne_co2e`` is set.
         If False, negative EEF is clipped to zero in the cost function but still reported
         in the output flight. Only used if ``dollar_tonne_co2e`` is set.
-    avoidance_regions : list of polygon coordinate lists, or None
+    avoidance_regions : list[list[tuple[float, float]]] | None, default None
         Polygons to exclude from the search, defined as lists of ``(lon, lat)`` vertices.
-        Edges intersecting any polygon are removed and the DAG is re-pruned.
+        Edges intersecting any polygon are removed and the :class:`HorizontalDAG` is re-pruned.
+        Not supported when ``dag`` is a :class:`Track`.
+    fl_choices : npt.NDArray[FLOAT_DTYPE] | None, default None
+        Candidate cruise flight levels in feet. If *None*, the eastbound/westbound defaults
+        from :func:`cruise_flight_levels` are used.
     **kwargs
-        Additional parameters for DAG generation if ``dag`` is None. Passed into
-        ``HorizontalDAG.from_poisson``.
+        Additional parameters for :class:`HorizontalDAG` generation if ``dag`` is None. Passed into
+        :meth:`HorizontalDAG.from_poisson`.
     """
 
     def __init__(
@@ -1843,17 +1858,17 @@ class Optimizer:
         flight : Flight
             Trajectory supplying the lateral path, schedule, and (for ``use_flown_climb_descent``)
             the flown altitude profile.
-        met : MetDataset or xr.Dataset or None
+        met : MetDataset | xr.Dataset | None
             Gridded met to interpolate. Mutually exclusive with ``fl_profile``.
-        fl_profile : xr.Dataset or None
+        fl_profile : xr.Dataset | None
             Pre-interpolated per-waypoint met columns. Mutually exclusive with ``met``.
-        aircraft_type : str or None
+        aircraft_type : str | None
             PS model key. If *None*, taken from ``flight.attrs``.
-        origin_icao, dest_icao : str or None
+        origin_icao, dest_icao : str | None
             ICAO codes. If *None*, taken from ``flight.attrs``, else the nearest airport.
-        eef : xr.DataArray or MetDataArray or None
+        eef : xr.DataArray | MetDataArray | None
             Effective energy forcing per meter, if supplied separately from ``met``.
-        altitude_ft : npt.NDArray[np.floating] or None
+        altitude_ft : npt.NDArray[np.floating] | None
             Candidate flight levels in feet, used only with ``met``. If *None*, the
             eastbound/westbound defaults from :func:`cruise_flight_levels` are used. With
             ``fl_profile`` the levels come from its ``altitude_ft`` coordinate.
@@ -2057,20 +2072,20 @@ class Optimizer:
         ----------
         n_iter : int, default 3
             Maximum number of mass-convergence iterations. Each iteration re-solves the full DP.
-        cost_index : float or None, default None
+        cost_index : float | None, default None
             If provided, updates ``self.cost_index`` before solving. This parameter is safe to vary
             between calls without rebuilding intermediate artifacts.
-        dollar_tonne_co2e : float or None, default None
+        dollar_tonne_co2e : float | None, default None
             If provided, updates ``self.dollar_tonne_co2e`` before solving. Safe to vary between
             calls without rebuilding intermediate artifacts.
-        aircraft_type : str or None, default None
+        aircraft_type : str | None, default None
             If provided, updates ``self.aircraft_type``, ``self.atyp``, and ``self.mach_choices``
             before solving. Safe to vary between calls without rebuilding the DAG or met lookup
             provided the met lookup was built with a sufficiently long ``flight_hours`` window
             to accommodate the new aircraft's speed.
-        payload : float or None, default None
+        payload : float | None, default None
             Aircraft payload in kg if known. If None, this is estimated with pycontrails.
-        allow_cooling_credit : bool or None, default None
+        allow_cooling_credit : bool | None, default None
             If provided, updates ``self.allow_cooling_credit`` before solving.
 
         Returns
@@ -2587,13 +2602,13 @@ class Optimizer:
 
         Parameters
         ----------
-        altitude_ft : float or None
+        altitude_ft : float | None
             Flight level in feet (e.g. ``37000``). Snaps to the nearest available
             level. If *None*, uses the first available level.
-        time : pd.Timestamp or None
+        time : pd.Timestamp | None
             Time to select. Snaps to the nearest available time step. If *None*,
             uses the first available time step.
-        ax : GeoAxes or None
+        ax : GeoAxes | None
             Cartopy GeoAxes to plot on. If None, calls ``self.dag.plot()`` to create one.
         **kwargs
             Passed to ``ax.quiver``.

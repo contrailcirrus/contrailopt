@@ -145,7 +145,7 @@ def flight_profile_from_met(
 
     Parameters
     ----------
-    met : MetDataset or xr.Dataset
+    met : MetDataset | xr.Dataset
         Gridded met with ``air_temperature``, ``eastward_wind``, ``northward_wind``,
         and optionally ``eef_per_m``.
     lon, lat : npt.NDArray[np.floating]
@@ -154,7 +154,7 @@ def flight_profile_from_met(
         Waypoint times, used to select the met time step for each column.
     altitude_ft : npt.NDArray[np.floating]
         Candidate flight levels in feet.
-    eef : xr.DataArray or MetDataArray or None
+    eef : xr.DataArray | MetDataArray | None
         Effective energy forcing per meter, if supplied separately from ``met``.
 
     Returns
