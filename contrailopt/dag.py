@@ -1147,7 +1147,7 @@ def _dual_az_edges(
     dest_idx: int,
     max_angle_deg: float = 40.0
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
-    """Filter directed edges using a dual azimuth constraint.
+    """Filter directed edges using azimuth and progress constraints.
 
     For each pair of nodes within ``max_dist_m``, the directed edge tail -> head
     is included iff:
@@ -1156,11 +1156,13 @@ def _dual_az_edges(
        from tail to the destination (node ``dest_idx``).
     2. The azimuth from head to tail is within ``max_angle_deg`` of the azimuth
        from head to the origin (node ``origin_idx``).
+    3. The head has a strictly larger progress score than the tail, where the score
+       of a node is its distance from the origin minus its distance to the destination.
 
-    These two conditions ensure that each edge roughly points toward the destination
-    and away from the origin. Together, they constrain edges to lie within a
-    football-shaped corridor between origin and destination and guarantee that each
-    edge is forward-pointing.
+    The first two conditions ensure that each edge roughly points toward the destination
+    and away from the origin, constraining edges to lie within a football-shaped corridor
+    between origin and destination. The third makes the graph acyclic, since a cycle would
+    have to return to the progress score it started from.
 
     Returns
     -------
@@ -1173,6 +1175,11 @@ def _dual_az_edges(
     az_to_dest = geo.azimuth(lon, lat, lon[dest_idx], lat[dest_idx])
     az_to_origin = geo.azimuth(lon, lat, lon[origin_idx], lat[origin_idx])
 
+    # Per-node progress score: minimal at the origin, maximal at the destination
+    progress = geo.haversine(lon, lat, lon[origin_idx], lat[origin_idx]) - geo.haversine(
+        lon, lat, lon[dest_idx], lat[dest_idx]
+    )
+
     # Compute azimuths for all candidate edges
     az_at_tail = geo.azimuth(lon[tail], lat[tail], lon[head], lat[head])
     at_at_head = geo.azimuth(lon[head], lat[head], lon[tail], lat[tail])
@@ -1182,7 +1189,11 @@ def _dual_az_edges(
     delta_tail = np.abs((az_at_tail - az_to_dest[tail] + 180.0) % 360.0 - 180.0)
     delta_head = np.abs((at_at_head - az_to_origin[head] + 180.0) % 360.0 - 180.0)
 
-    keep = (delta_tail <= max_angle_deg) & (delta_head <= max_angle_deg)
+    keep = (
+        (delta_tail <= max_angle_deg)
+        & (delta_head <= max_angle_deg)
+        & (progress[head] > progress[tail])
+    )
     edges = np.column_stack([tail[keep], head[keep]])
     edge_dist = geo.haversine(lon[tail[keep]], lat[tail[keep]], lon[head[keep]], lat[head[keep]])
     return edges, edge_dist
