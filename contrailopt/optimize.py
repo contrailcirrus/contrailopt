@@ -2871,7 +2871,7 @@ class Optimizer:
             ]
         )
 
-        fl_cmap = plt.colormaps["coolwarm"].resampled(n_fl)
+        fl_cmap = plt.colormaps["cool"].resampled(n_fl)
         # BoundaryNorm: one color per FL, boundaries at midpoints between FLs
         fl_step = self.fl_choices[1] - self.fl_choices[0] if n_fl > 1 else 2000.0
         fl_boundaries = np.concatenate(
