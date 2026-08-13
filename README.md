@@ -4,6 +4,10 @@
 
 Aircraft performance is modeled with the [Poll–Schumann (PS) model](https://doi.org/10.1017/aer.2020.62). The library optionally takes gridded weather data, used for performance and true-airspeed calculations, and a contrail forecast (in units of J/m) that drives the climate term. It solves the resulting continuous optimization problem and additionally performs discrete avoidance around polygonal regions. `contrailopt` is designed to be interoperable with [pycontrails](https://py.contrails.org).
 
+![Cost-optimal and contrail-aware altitude profiles](https://opt.contrails.org/_static/profiles.png)
+
+*The image above shows the same trajectory optimized with and without contrail warming in the cost function. The cost-optimal profile flies through both regions of contrail forcing while the contrail-aware profile avoids them for a small fuel penalty.*
+
 ## Installation
 
 `contrailopt` is not yet published on PyPI. Clone the repository and install from source with `pip`:
