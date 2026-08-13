@@ -37,6 +37,8 @@ exclude_patterns = [
 nb_execution_mode = "off"
 nb_merge_streams = True
 
+myst_enable_extensions = ["dollarmath"]
+
 autosummary_generate = True
 
 autodoc_default_options = {
