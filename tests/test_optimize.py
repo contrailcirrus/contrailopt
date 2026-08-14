@@ -15,6 +15,7 @@ from contrailopt.optimize import (
     FLOAT_DTYPE,
     DAGState,
     Optimizer,
+    _climbing_fl_idxs,
     _compute_edge_climbs,
     _compute_ground_climbs,
     _cruise_zone_weights,
@@ -141,6 +142,28 @@ class TestEstimateSampleTimes:
         assert times.shape == (4, 1)
         # Second edge's first sample should be later than first edge's last
         assert times[2, 0] > times[1, 0]
+
+
+class TestClimbingFlIdxs:
+    FL_CHOICES = np.array([30_000.0, 32_000.0, 34_000.0, 36_000.0])
+
+    def test_climb_reads_each_level_in_turn(self) -> None:
+        """A climb takes the levels it passes through, then holds the target."""
+        # Climbing FL300 -> FL360 over 120 km reaches 30000, 33500 and 36000 ft
+        dist = np.array([0.0, 70_000.0, 120_000.0, 200_000.0])
+        climb_dist = np.full(4, 120_000.0)
+
+        idxs = _climbing_fl_idxs(dist, climb_dist, 30_000.0, 36_000.0, self.FL_CHOICES)
+
+        np.testing.assert_array_equal(idxs, [0, 2, 3, 3])
+
+    def test_no_climb_holds_the_target(self) -> None:
+        """A step down consumes no distance, so the target level applies throughout."""
+        dist = np.array([0.0, 50_000.0])
+
+        idxs = _climbing_fl_idxs(dist, np.zeros(2), 36_000.0, 30_000.0, self.FL_CHOICES)
+
+        np.testing.assert_array_equal(idxs, [0, 0])
 
 
 class TestCruiseZoneWeights:
