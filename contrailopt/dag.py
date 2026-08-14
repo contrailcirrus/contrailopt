@@ -204,7 +204,7 @@ class HorizontalDAG:
         """Return the CSR index of the directed edge (src, dst).
 
         Performs a linear scan over the neighbors of ``src``. This could be
-        replaced with ``np.searchsorted`` if needed, but that would require
+        replaced with :func:`np.searchsorted` if needed, but that would require
         enforcing sorted neighbors during construction.
 
         Raises
@@ -247,8 +247,8 @@ class HorizontalDAG:
         flat_edge_idx : npt.NDArray[np.int64]
             ``(e,)`` index of each edge in the CSR arrays (``adj``, ``edge_dist``).
 
-        Here ``e = out_degree[nodes].sum()``, the total number of outgoing
-        edges from all ``nodes``.
+            Here ``e = out_degree[nodes].sum()``, the total number of outgoing
+            edges from all ``nodes``.
         """
         flat_pos, lengths = _csr_flat_pos(self.adj_ptr, nodes)
         src_idx = np.repeat(np.arange(len(nodes)), lengths)
@@ -472,7 +472,7 @@ class HorizontalDAG:
             ``(m + 1,)`` CSR-style pointer so edge ``i``'s samples are at
             ``sample_lon[edge_ptr[i]: edge_ptr[i+1]]``.
 
-        Here ``s = edge_ptr[-1]``, the total number of sample points across all edges.
+            Here ``s = edge_ptr[-1]``, the total number of sample points across all edges.
         """
         src = self.edge_src
         src_lon = self.lon[src]

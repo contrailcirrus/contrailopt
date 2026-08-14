@@ -30,8 +30,6 @@ source_suffix = {
 exclude_patterns = [
     "_build",
     "**.ipynb_checkpoints",
-    # Work in progress. Remove from this list and add to notebooks.rst when ready.
-    "notebooks/dag.ipynb",
 ]
 
 nb_execution_mode = "off"
@@ -52,7 +50,6 @@ napoleon_use_param = True
 napoleon_use_rtype = True
 napoleon_preprocess_types = True
 napoleon_type_aliases = {
-    "np.ndarray": "numpy.ndarray",
     "npt.NDArray[FLOAT_DTYPE]": "numpy.ndarray",
     "npt.NDArray[np.bool_]": "numpy.ndarray",
     "npt.NDArray[np.datetime64]": "numpy.ndarray",
@@ -64,18 +61,13 @@ napoleon_type_aliases = {
     "pd.Timedelta": "pandas.Timedelta",
     "xr.DataArray": "xarray.DataArray",
     "xr.Dataset": "xarray.Dataset",
+    "FuncAnimation": "~matplotlib.animation.FuncAnimation",
     "Flight": "~pycontrails.Flight",
     "MetDataArray": "~pycontrails.MetDataArray",
     "MetDataset": "~pycontrails.MetDataset",
-    "FuncAnimation": "~matplotlib.animation.FuncAnimation",
-    "PSAircraftEngineParams": "~pycontrails.models.ps_model.PSAircraftEngineParams",
     "ps_aircraft_params.PSAircraftEngineParams": (
         "~pycontrails.models.ps_model.PSAircraftEngineParams"
     ),
-    "AirportCoords": "~contrailopt.dag.AirportCoords",
-    "EdgeMetLookup": "~contrailopt.dag.EdgeMetLookup",
-    "HorizontalDAG": "~contrailopt.dag.HorizontalDAG",
-    "Track": "~contrailopt.dag.Track",
 }
 
 intersphinx_mapping = {

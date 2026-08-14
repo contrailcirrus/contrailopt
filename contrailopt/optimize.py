@@ -216,7 +216,7 @@ def _calculate_cruise_at_samples(
         Candidate Mach numbers. Shape ``(n_mach,)``.
     post_climb_mass : npt.NDArray[FLOAT_DTYPE]
         Mass after climb for each edge and FL. Shape ``(n_edge, n_fl)``.
-    atyp : PSAircraftEngineParams
+    atyp : ps_aircraft_params.PSAircraftEngineParams
         Aircraft/engine parameters.
     takeoff_time : pd.Timestamp
         Flight departure time.
@@ -354,7 +354,7 @@ class DAGState:
 
 @dataclass(kw_only=True, slots=True, frozen=True)
 class DAGResult:
-    """The output of Optimizer.solve()."""
+    """The output of :meth:`Optimizer.solve`."""
 
     state: DAGState
     amass_init: float
@@ -479,7 +479,7 @@ def _compute_edge_climbs(
         Elapsed time at each active source. Shape ``(n_src,)``.
     flat_edge_idx : npt.NDArray[np.int64]
         Global edge index for each edge. Shape ``(n_edge,)``.
-    atyp : PSAircraftEngineParams
+    atyp : ps_aircraft_params.PSAircraftEngineParams
         Aircraft/engine parameters.
     takeoff_time : pd.Timestamp
         Flight departure time.
@@ -1899,7 +1899,7 @@ class Optimizer:
         allow_cooling_credit: bool = False,
         use_flown_climb_descent: bool = False,
     ) -> Self:
-        """Build a vertical-profile optimizer from a ``pycontrails.Flight`` trajectory.
+        """Build a vertical-profile optimizer from a :class:`pycontrails.Flight` trajectory.
 
         The optimized flight follows the flight's lateral path exactly, choosing flight level
         and Mach number along it via :func:`solve_track`. Weather comes from one of two
@@ -2772,6 +2772,7 @@ class Optimizer:
 
         :meth:`solve` must be called first. This re-runs a single :func:`solve_dag`
         pass with the converged ``amass_init``, capturing wavefront snapshots.
+
         Nodes are colored by ``best_cost[:, display_fl_idx]`` for a single FL.
         Edges whose source node has been processed are shown in blue;
         remaining edges are shown muted. The optimal path is then revealed
