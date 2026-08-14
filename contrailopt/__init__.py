@@ -11,7 +11,6 @@ from contrailopt.dag import (
     Track,
     validate_flight_profile,
 )
-from contrailopt.metrics import flight_metrics
 from contrailopt.optimize import (
     DAGResult,
     DAGState,
@@ -36,7 +35,6 @@ __all__ = [
     "Track",
     "cruise_flight_levels",
     "estimate_flight_hours",
-    "flight_metrics",
     "load_faa_waypoints",
     "slerp",
     "solve_dag",
