@@ -25,7 +25,7 @@ FL_CHOICES = np.arange(28_000.0, 40_001.0, 2000.0)
 
 BLOBS = (
     # (start fraction, end fraction, lower altitude, upper altitude)
-    (0.05, 0.25, 33500.0, 34500.0),
+    (0.1, 0.3, 33500.0, 34500.0),
     (0.55, 0.8, 37500.0, 38500.0),
 )
 EEF_RANGE = (2e8, 1e9)
@@ -33,7 +33,7 @@ EEF_CORRELATION = 0.01
 SEED = 1234
 
 # Add a small offset between the two profiles, so they stay distinct where they coincide
-PROFILE_OFFSET_FT = 40.0
+PROFILE_OFFSET_FT = 50.0
 
 COST_INDEX = 80.0
 DOLLAR_TONNE_CO2E = 10.0
@@ -148,8 +148,8 @@ def plot(
     )
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    _offset(fl_cost, PROFILE_OFFSET_FT).plot_profile(ax=ax, label="Cost optimal")
-    _offset(fl_contrail, -PROFILE_OFFSET_FT).plot_profile(ax=ax, label="Contrail aware")
+    _offset(fl_cost, PROFILE_OFFSET_FT).plot_profile(ax=ax, label="Cost optimal", color="C0")
+    _offset(fl_contrail, -PROFILE_OFFSET_FT).plot_profile(ax=ax, label="Contrail aware", color="C2")
 
     curtain = field.rename({"waypoint": "time"}).assign_coords(time=flight["time"])
     curtain.plot.pcolormesh(
