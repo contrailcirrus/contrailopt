@@ -483,7 +483,7 @@ def _compute_edge_climbs(
         Aircraft/engine parameters.
     takeoff_time : pd.Timestamp
         Flight departure time.
-    met_lookup : EdgeMetLookup | None
+    met_lookup : EdgeMetLookup or None
         Met interpolator. If None, ISA + zero wind is used.
 
     Returns
@@ -1618,9 +1618,9 @@ def cruise_flight_levels(
 
     Parameters
     ----------
-    origin_icao : str | AirportCoords
+    origin_icao : str or AirportCoords
         ICAO code for the origin airport (e.g. ``"KLAX"``) or pre-fetched coordinates.
-    dest_icao : str | AirportCoords
+    dest_icao : str or AirportCoords
         ICAO code for the destination airport or pre-fetched coordinates.
 
     Returns
@@ -1731,26 +1731,26 @@ class Optimizer:
 
     Parameters
     ----------
-    origin_icao : str | AirportCoords
+    origin_icao : str or AirportCoords
         ICAO code for the origin airport (e.g. ``"KLAX"``), or an ``AirportCoords`` instance.
-    dest_icao : str | AirportCoords
+    dest_icao : str or AirportCoords
         ICAO code for the destination airport, or an ``AirportCoords`` instance.
     aircraft_type : str
         Aircraft type key in the PS model parameter table (e.g. ``"A320"``).
     takeoff_time : pd.Timestamp
         Departure time, used for met interpolation.
-    met : MetDataset | xr.Dataset | None, default None
+    met : MetDataset or xr.Dataset or None, default None
         Gridded met data with ``air_temperature``, ``eastward_wind``, and ``northward_wind``.
         If *None*, cruise performance uses ISA temperatures and zero wind.
-    eef : xr.DataArray | MetDataArray | None, default None
+    eef : xr.DataArray or MetDataArray or None, default None
         Optional ``eef_per_m`` DataArray on its own lon/lat grid. If provided,
         EEF is interpolated onto sample points independently from the weather grid, avoiding
         the need to pre-merge onto a common grid. Takes precedence over ``eef_per_m`` in
         ``met`` if both are present. Assumed to adhere to pycontrails ``MetDataArray`` conventions.
-    dag : HorizontalDAG | Track | None, default None
-        Pre-built graph. If *None*, a ``HorizontalDAG`` is generated via Poisson-disk sampling
+    dag : HorizontalDAG or Track or None, default None
+        Pre-built graph. If *None*, a :class:`HorizontalDAG` is generated via Poisson-disk sampling
         along the great circle. A supplied ``HorizontalDAG`` must have origin and destination
-        nodes agreeing with the airport coordinates. A ``Track`` is a fixed sequence of timed
+        nodes agreeing with the airport coordinates. A :class:`Track` is a fixed sequence of timed
         waypoints with mid-air endpoints, normally supplied by :meth:`from_flight` rather
         than directly.
     cost_index : float, default 60.0
@@ -1770,20 +1770,20 @@ class Optimizer:
         burn stays physical.
     met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
-    flight_hours : int | None, default None
+    flight_hours : int or None, default None
         Upper-bound flight duration in hours for met time window. If None, estimated from
         the aircraft type. Providing an explicit value decouples the met lookup from the
-        aircraft, allowing the user to call the ``solve()`` method with a different aircraft
+        aircraft, allowing the user to call the :meth:`solve` method with a different aircraft
         type without re-initializing the optimizer.
     allow_cooling_credit : bool, default False
         If True, negative EEF (cooling contrails) reduces cost when ``dollar_tonne_co2e`` is set.
         If False, negative EEF is clipped to zero in the cost function but still reported
         in the output flight. Only used if ``dollar_tonne_co2e`` is set.
-    avoidance_regions : list[list[tuple[float, float]]] | None, default None
+    avoidance_regions : list[list[tuple[float, float]]] or None, default None
         Polygons to exclude from the search, defined as lists of ``(lon, lat)`` vertices.
         Edges intersecting any polygon are removed and the :class:`HorizontalDAG` is re-pruned.
         Not supported when ``dag`` is a :class:`Track`.
-    fl_choices : npt.NDArray[FLOAT_DTYPE] | None, default None
+    fl_choices : npt.NDArray[FLOAT_DTYPE] or None, default None
         Candidate cruise flight levels in feet. If *None*, the eastbound/westbound defaults
         from :func:`cruise_flight_levels` are used.
     **kwargs
@@ -1916,17 +1916,17 @@ class Optimizer:
         flight : Flight
             Trajectory supplying the lateral path, schedule, and (for ``use_flown_climb_descent``)
             the flown altitude profile.
-        met : MetDataset | xr.Dataset | None
+        met : MetDataset or xr.Dataset or None
             Gridded met to interpolate. Mutually exclusive with ``fl_profile``.
-        fl_profile : xr.Dataset | None
+        fl_profile : xr.Dataset or None
             Pre-interpolated per-waypoint met columns. Mutually exclusive with ``met``.
-        aircraft_type : str | None
+        aircraft_type : str or None
             PS model key. If *None*, taken from ``flight.attrs``.
-        origin_icao, dest_icao : str | None
+        origin_icao, dest_icao : str or None
             ICAO codes. If *None*, taken from ``flight.attrs``, else the nearest airport.
-        eef : xr.DataArray | MetDataArray | None
+        eef : xr.DataArray or MetDataArray or None
             Effective energy forcing per meter, if supplied separately from ``met``.
-        altitude_ft : npt.NDArray[np.floating] | None
+        altitude_ft : npt.NDArray[np.floating] or None
             Candidate flight levels in feet, used only with ``met``. If *None*, the
             eastbound/westbound defaults from :func:`cruise_flight_levels` are used. With
             ``fl_profile`` the levels come from its ``altitude_ft`` coordinate.
@@ -2130,20 +2130,20 @@ class Optimizer:
         ----------
         n_iter : int, default 3
             Maximum number of mass-convergence iterations. Each iteration re-solves the full DP.
-        cost_index : float | None, default None
+        cost_index : float or None, default None
             If provided, updates ``self.cost_index`` before solving. This parameter is safe to vary
             between calls without rebuilding intermediate artifacts.
-        dollar_tonne_co2e : float | None, default None
+        dollar_tonne_co2e : float or None, default None
             If provided, updates ``self.dollar_tonne_co2e`` before solving. Safe to vary between
             calls without rebuilding intermediate artifacts.
-        aircraft_type : str | None, default None
+        aircraft_type : str or None, default None
             If provided, updates ``self.aircraft_type``, ``self.atyp``, and ``self.mach_choices``
             before solving. Safe to vary between calls without rebuilding the DAG or met lookup
             provided the met lookup was built with a sufficiently long ``flight_hours`` window
             to accommodate the new aircraft's speed.
-        payload : float | None, default None
+        payload : float or None, default None
             Aircraft payload in kg if known. If None, this is estimated with pycontrails.
-        allow_cooling_credit : bool | None, default None
+        allow_cooling_credit : bool or None, default None
             If provided, updates ``self.allow_cooling_credit`` before solving.
 
         Returns
@@ -2531,7 +2531,7 @@ class Optimizer:
         per-sample ``eef_per_m``. Without met, falls back to one waypoint per
         DAG node.
 
-        The ``solve()`` method must be called first.
+        The :meth:`solve` method must be called first.
         """
         path_h, path_fl_idx, path_mach = self.reconstruct_path()
         state = self.result.state
@@ -2660,13 +2660,13 @@ class Optimizer:
 
         Parameters
         ----------
-        altitude_ft : float | None
+        altitude_ft : float or None
             Flight level in feet (e.g. ``37000``). Snaps to the nearest available
             level. If *None*, uses the first available level.
-        time : pd.Timestamp | None
+        time : pd.Timestamp or None
             Time to select. Snaps to the nearest available time step. If *None*,
             uses the first available time step.
-        ax : GeoAxes | None
+        ax : GeoAxes or None
             Cartopy GeoAxes to plot on. If None, calls ``self.dag.plot()`` to create one.
         **kwargs
             Passed to ``ax.quiver``.
@@ -2770,7 +2770,7 @@ class Optimizer:
     ) -> "FuncAnimation":
         """Re-run the DP with converged mass and return a wavefront animation.
 
-        :meth:`solve` must be called first. This re-runs a single ``solve_dag``
+        :meth:`solve` must be called first. This re-runs a single :func:`solve_dag`
         pass with the converged ``amass_init``, capturing wavefront snapshots.
         Nodes are colored by ``best_cost[:, display_fl_idx]`` for a single FL.
         Edges whose source node has been processed are shown in blue;
@@ -2779,10 +2779,10 @@ class Optimizer:
 
         Parameters
         ----------
-        display_fl_idx : int | None
+        display_fl_idx : int or None
             FL index into ``fl_choices`` to display costs for. If *None*,
             uses the FL the optimal path spends the most legs at.
-        ax : GeoAxes | None
+        ax : GeoAxes or None
             Cartopy GeoAxes to draw on. If *None*, a new figure is created.
 
         Returns

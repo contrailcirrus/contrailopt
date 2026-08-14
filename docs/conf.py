@@ -44,7 +44,6 @@ autosummary_generate = True
 autodoc_default_options = {
     "members": True,
     "member-order": "bysource",
-    "show-inheritance": True,
 }
 
 napoleon_google_docstring = False
@@ -65,10 +64,18 @@ napoleon_type_aliases = {
     "pd.Timedelta": "pandas.Timedelta",
     "xr.DataArray": "xarray.DataArray",
     "xr.Dataset": "xarray.Dataset",
-    "Flight": "pycontrails.Flight",
-    "MetDataArray": "pycontrails.MetDataArray",
-    "MetDataset": "pycontrails.MetDataset",
-    "FuncAnimation": "matplotlib.animation.FuncAnimation",
+    "Flight": "~pycontrails.Flight",
+    "MetDataArray": "~pycontrails.MetDataArray",
+    "MetDataset": "~pycontrails.MetDataset",
+    "FuncAnimation": "~matplotlib.animation.FuncAnimation",
+    "PSAircraftEngineParams": "~pycontrails.models.ps_model.PSAircraftEngineParams",
+    "ps_aircraft_params.PSAircraftEngineParams": (
+        "~pycontrails.models.ps_model.PSAircraftEngineParams"
+    ),
+    "AirportCoords": "~contrailopt.dag.AirportCoords",
+    "EdgeMetLookup": "~contrailopt.dag.EdgeMetLookup",
+    "HorizontalDAG": "~contrailopt.dag.HorizontalDAG",
+    "Track": "~contrailopt.dag.Track",
 }
 
 intersphinx_mapping = {

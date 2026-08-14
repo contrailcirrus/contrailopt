@@ -924,7 +924,7 @@ class EdgeMetLookup:
             2D array of time coordinates with shape ``(n_sample, n_fl)``, where
             ``n_sample = len(sample_idxs)``. Each FL gets its own query time
             (e.g. to account for FL-dependent climb duration).
-        fl_idx : npt.NDArray[np.int64] | None
+        fl_idx : npt.NDArray[np.int64] or None
             Flight level indices into the ``altitude_ft`` dimension. If ``None``
             (default), all FLs are returned with shape ``(n_sample, n_fl)``.
             If an array, outputs are ``(n_sample, len(fl_idx))``.
@@ -978,7 +978,7 @@ class EdgeMetLookup:
 
         Parameters
         ----------
-        met : MetDataset | xr.Dataset
+        met : MetDataset or xr.Dataset
             Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind".
             If "eef_per_m" is present, it will also be included in the output with
             NaN values filled to 0.0 (no EEF forecast is treated as zero forcing).
@@ -995,7 +995,7 @@ class EdgeMetLookup:
             Number of hourly time steps to retain starting from takeoff_time.
         spacing_m : float
             Spacing in meters between sample points along edges. Passed to ``dag.sample_edges``.
-        eef : xr.DataArray | MetDataArray | None, default None
+        eef : xr.DataArray or MetDataArray or None, default None
             Optional "eef_per_m" DataArray on its own lon/lat grid.
             If provided, EEF is interpolated onto sample points independently from the
             weather grid, avoiding the need to pre-merge onto a common grid.
