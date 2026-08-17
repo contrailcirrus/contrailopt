@@ -18,7 +18,7 @@ jobs:
         with:
           fetch-depth: 0  # setuptools-scm reads the version from git history
 
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: '3.14'
           cache-suffix: docs
