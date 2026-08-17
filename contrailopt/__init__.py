@@ -11,6 +11,7 @@ from contrailopt.dag import (
     Track,
     validate_flight_profile,
 )
+from contrailopt.grid_utils import fill_nan_spatial
 from contrailopt.optimize import (
     DAGResult,
     DAGState,
@@ -35,6 +36,7 @@ __all__ = [
     "Track",
     "cruise_flight_levels",
     "estimate_flight_hours",
+    "fill_nan_spatial",
     "load_faa_waypoints",
     "slerp",
     "solve_dag",

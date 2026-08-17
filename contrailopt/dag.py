@@ -826,6 +826,7 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
     each cast to float32 and oriented ``(waypoint, altitude_ft)``.
 
     NaN in the core weather variables raises, while NaN in ``eef_per_m`` is zero-filled.
+    Use :func:`contrailopt.fill_nan_spatial` on the gridded met fill NaNs.
     """
     if ds.sizes["waypoint"] != n_nodes:
         raise ValueError(f"ds has {ds.sizes['waypoint']} waypoints but dag has {n_nodes} nodes")
@@ -845,7 +846,11 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
         if name == "eef_per_m":
             col = np.nan_to_num(col, nan=0.0)
         elif np.isnan(col).any():
-            raise ValueError(f"NaN values found in '{name}'")
+            raise ValueError(
+                f"NaN values found in '{name}'. Fill them before building the profile, "
+                f"for example by passing the gridded met through "
+                f"contrailopt.fill_nan_spatial."
+            )
         data_vars[name] = (("waypoint", "altitude_ft"), col)
 
     return xr.Dataset(data_vars, coords={"altitude_ft": ds["altitude_ft"].values})
@@ -982,7 +987,8 @@ class EdgeMetLookup:
             Gridded met dataset with "air_temperature", "eastward_wind", and "northward_wind".
             If "eef_per_m" is present, it will also be included in the output with
             NaN values filled to 0.0 (no EEF forecast is treated as zero forcing).
-            NaN values in weather variables are not allowed and will raise an error.
+            NaN values in weather variables are not allowed and will raise an error;
+            use :func:`contrailopt.fill_nan_spatial` to patch them beforehand.
             Either a pycontrails ``MetDataset`` or a raw ``xr.Dataset`` with similar
             structure can be passed.
         dag : HorizontalDAG
@@ -1065,7 +1071,11 @@ class EdgeMetLookup:
         # Raise on NaN in core weather - downstream computations would be poisoned.
         for var in ("air_temperature", "eastward_wind", "northward_wind"):
             if ds[var].isnull().any():
-                raise ValueError(f"NaN values found in '{var}' after interpolation onto samples")
+                raise ValueError(
+                    f"NaN values found in '{var}' after interpolation onto samples. Fill "
+                    f"them before optimizing by passing met through "
+                    f"contrailopt.fill_nan_spatial."
+                )
 
         # NaN-fill eef_per_m with 0.0. If NaNs are kept, downstream computations would be poisoned.
         if "eef_per_m" in ds:  # if eef is not None, this is skipped

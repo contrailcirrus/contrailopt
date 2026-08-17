@@ -39,5 +39,6 @@ Utilities
 .. autosummary::
    :toctree: api/
 
+   fill_nan_spatial
    load_faa_waypoints
    validate_flight_profile

@@ -8,6 +8,67 @@ import pandas as pd
 import xarray as xr
 from pycontrails import MetDataArray, MetDataset
 from pycontrails.physics import units
+from scipy import ndimage
+
+
+def fill_nan_spatial(ds: xr.Dataset) -> xr.Dataset:
+    """Fill NaN in gridded met with the value at the nearest valid horizontal neighbor.
+
+    **Nearest** is measured in grid cells rather than on the sphere. The fill does not wrap
+    across the antimeridian, and it ignores the convergence of meridians at the poles.
+
+    Each ``(level, time)`` slice is filled independently, so values are never borrowed
+    across pressure levels or time steps.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Gridded met with dims ``longitude``, ``latitude``, ``level``, and ``time``.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with NaN replaced by the value at the nearest ``(longitude, latitude)``
+        cell holding a finite value.
+    """
+    for name, da in ds.items():
+        if tuple(da.dims) != MetDataset.dim_order:
+            raise ValueError(
+                f"Variable '{name}' has dims {da.dims}, expected {MetDataset.dim_order}"
+            )
+
+    for dim in ("longitude", "latitude"):
+        if len(ds.chunksizes.get(dim, ())) > 1:
+            raise ValueError(
+                f"ds is chunked along '{dim}', so each chunk would be filled from a partial "
+                "horizontal grid. Rechunk with ds.chunk(longitude=-1, latitude=-1)."
+            )
+
+    return ds.map_blocks(_fill_block, template=ds)
+
+
+def _fill_block(block: xr.Dataset) -> xr.Dataset:
+    """Fill NaN in each ``(level, time)`` slice of a ``(lon, lat, level, time)`` block."""
+    out = block.copy(deep=True)
+    for name in out.data_vars:
+        arr = out[name].values
+        for li in range(arr.shape[2]):
+            for ti in range(arr.shape[3]):
+                arr[:, :, li, ti] = _fill_nan_slab(arr[:, :, li, ti], name)
+    return out
+
+
+def _fill_nan_slab(slab: npt.NDArray[np.floating], name: str) -> npt.NDArray[np.floating]:
+    """Fill NaN in a 2D (longitude, latitude) slab from the nearest finite cell."""
+    mask = ~np.isfinite(slab)
+
+    if not mask.any():
+        return slab
+    if mask.all():
+        raise ValueError(f"A (level, time) slice of '{name}' contains only NaN values")
+
+    ind = ndimage.distance_transform_edt(mask, return_distances=False, return_indices=True)
+    return slab[*ind]
 
 
 def localize_horizontally(
@@ -163,6 +224,7 @@ def flight_profile_from_met(
         Dims ``(waypoint, altitude_ft)`` with ``air_temperature``, ``u_wind``, ``v_wind``,
         and (when available) ``eef_per_m``; coords ``longitude``, ``latitude``, ``time``.
     """
+
     def _to_ds(obj: MetDataset | xr.Dataset) -> xr.Dataset:
         return obj.data if isinstance(obj, MetDataset) else MetDataset(obj).data
 
