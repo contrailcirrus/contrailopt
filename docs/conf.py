@@ -85,4 +85,5 @@ html_title = f"{project} v{release}"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_favicon = "https://py.contrails.org/_static/favicon.svg"
+html_logo = "https://py.contrails.org/_static/img/icon-light.svg"
 html_last_updated_fmt = "%Y-%m-%d"
