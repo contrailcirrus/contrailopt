@@ -577,6 +577,51 @@ class HorizontalDAG:
         return ax
 
     @classmethod
+    def from_static_graph(
+        cls,
+        ds: xr.Dataset,
+        origin_lon: float,
+        origin_lat: float,
+        dest_lon: float,
+        dest_lat: float,
+        max_angle_deg: float = 40.0,
+        max_dist_m: float = 500_000.0
+    ) -> Self:
+        """Build a DAG from a static undirected graph."""
+        static_lon = ds["lon"].values
+        static_lat = ds["lat"].values
+        static_tail = ds["tail"].values
+        static_head = ds["head"].values
+        n_nodes = static_lon.size
+
+        # origin and destination are second-to-last and last nodes
+        # avoids needing to update existing tail and head indexes
+        lon = np.concat([static_lon, [origin_lon, dest_lon]])
+        lat = np.concat([static_lat, [origin_lat, dest_lat]])
+
+        # add departure and arrival routes as undirected edges
+        da_tail, da_head = _neighborhood_edges(
+            lon=static_lon,
+            lat=static_lat,
+            other_lon=np.array([origin_lon, dest_lon]),
+            other_lat=np.array([origin_lat, dest_lat]),
+            max_dist_m=max_dist_m,
+        )
+        tail = np.concat([static_tail, da_tail])
+        head = np.concat([static_head, da_head + n_nodes])
+
+        return cls.from_network(
+            lon=lon,
+            lat=lat,
+            tail=tail,
+            head=head,
+            origin_idx=n_nodes,
+            dest_idx=n_nodes + 1,
+            max_angle_deg=max_angle_deg,
+            directed=False
+        )
+
+    @classmethod
     def from_network(
         cls,
         lon: npt.NDArray[np.floating],
@@ -585,10 +630,20 @@ class HorizontalDAG:
         head: npt.NDArray[np.int64],
         origin_idx: int = 0,
         dest_idx: int = -1,
-        max_angle_deg: float = 40.0
+        max_angle_deg: float = 40.0,
+        directed: bool = False,
     ) -> Self:
-        """Build a DAG from a static network graph using the dual azimuth constraint."""
-        edges, dists = _dual_az_edges(lon, lat, tail, head, origin_idx, dest_idx, max_angle_deg)
+        """Build a DAG from a directed network graph using the dual azimuth constraint."""
+        edges, dists = _dual_az_edges(
+            lon,
+            lat,
+            tail,
+            head,
+            origin_idx,
+            dest_idx,
+            max_angle_deg,
+            directed
+        )
 
         n = len(lon)
         order = np.argsort(edges[:, 0])
@@ -1181,15 +1236,144 @@ class EdgeMetLookup:
         )
 
 
+@dataclass(kw_only=True, slots=True, frozen=True)
+class StaticMetInterpolation:
+    """Fields from static met lookup interpolated in altitude and time."""
+
+    air_temperature: npt.NDArray[np.floating]
+    headwind: npt.NDArray[np.floating]
+    eef_per_m: npt.NDArray[np.floating] | None
+
+
+@dataclass(kw_only=True, slots=True, frozen=True)
+class StaticMetLookup:
+    """Static met data aggregated along edges of graph."""
+
+    #: ``xr.Dataset`` with dims ``(edge, altitude_ft, time)`` containing
+    #: weather variables aggregated along edges.
+    ds: xr.Dataset
+
+    def __post_init__(self) -> None:
+        required = {"air_temperature", "headwind"}
+        missing = required - set(self.ds)
+        if missing:
+            raise ValueError(f"Met dataset missing required variables: {missing}")
+
+    def __repr__(self) -> str:
+        n_edges = self.ds.sizes["altitude_ft"]
+        n_fl = self.ds.sizes["altitude_ft"]
+        n_time = self.ds.sizes["time"]
+        name = type(self).__name__
+        return f"{name}({n_edges} edges, {n_fl} FLs, {n_time} time steps)"
+
+    def __call__(
+        self,
+        edge_idxs: npt.NDArray[np.int64],
+        times: npt.NDArray[np.datetime64],
+        fl_idx: npt.NDArray[np.int64] | None = None,
+    ) -> StaticMetInterpolation:
+        """Interpolate all variables at given times.
+
+        Parameters
+        ----------
+        edge_idxs : npt.NDArray[np.int64]
+            1D array of edge indices to query.
+        times : npt.NDArray[np.datetime64]
+            2D array of time coordinates with shape ``(n_edge, n_fl)``, where
+            ``n_edge = len(edge_idxs)``. Each FL gets its own query time
+            (e.g. to account for FL-dependent climb duration).
+        fl_idx : npt.NDArray[np.int64] | None
+            Flight level indices into the ``altitude_ft`` dimension. If ``None``
+            (default), all FLs are returned with shape ``(n_edge, n_fl)``.
+            If an array, outputs are ``(n_edge, len(fl_idx))``.
+
+        Returns
+        -------
+        StaticMetInterpolation
+            Interpolated met fields on requested edges and at requested times.
+        """
+        time_coords = self.ds["time"].values  # (n_time,) datetime64[ns]
+        time_s = (time_coords - time_coords[0]) / np.timedelta64(1, "s")
+        query_s = (times - time_coords[0]) / np.timedelta64(1, "s")
+
+        n_time = len(time_coords)
+        fp = np.arange(n_time, dtype=np.float64)
+        t_frac = np.interp(query_s, time_s, fp).astype(np.float32)  # np.interp returns float64
+        if np.any(~np.isfinite(t_frac)):  # idiot check
+            raise RuntimeError("Non-finite t_frac values")
+
+        t_lo = np.floor(t_frac).astype(np.int16)  # n_time << int16.max, and f32 + int16 = f32
+        t_hi = np.minimum(t_lo + 1, n_time - 1)
+        w = t_frac - t_lo
+
+        fl_idx = np.arange(self.ds.sizes["altitude_ft"]) if fl_idx is None else fl_idx
+
+        def _lerp(name: str) -> npt.NDArray[np.floating]:
+            data = self.ds[name].values  # (n_total_samples, n_fl, n_time)
+            lo = data[edge_idxs[:, np.newaxis], fl_idx[np.newaxis, :], t_lo]
+            hi = data[edge_idxs[:, np.newaxis], fl_idx[np.newaxis, :], t_hi]
+            return lo + w * (hi - lo)
+
+        return StaticMetInterpolation(
+            air_temperature=_lerp("air_temperature"),
+            headwind=_lerp("headwind"),
+            eef_per_m=_lerp("eef_per_m") if "eef_per_m" in self.ds else None,
+        )
+
+    @classmethod
+    def from_static_graph(
+        cls,
+        ds: xr.Dataset,
+        dag: HorizontalDAG,
+        altitude_ft: npt.NDArray[np.floating],
+        takeoff_time: pd.Timestamp,
+        flight_hours: int,
+    ) -> Self:
+        """Construct lookup from static graph."""
+        # FIXME: implement edge matching and use output
+        _match_edges(ds, dag)
+
+        # Ensure variables
+        variables = ["air_temperature", "headwind"]
+        if "eef_per_m" in ds:
+            variables.append("eef_per_m")
+        ds = ds[variables]
+
+        # Downselect in time
+        usable = select_flight_times(ds, takeoff_time, flight_hours)
+        ds = ds.sel(time=usable)
+
+        # Convert to altitude_ft coordinates and select vertically on FL choices
+        ds = to_altitude_ft(ds, altitude_ft)
+
+        # FIXME: handle departure/arrival edges not present in static graph
+        # FIXME: handle headwind reversal
+        return cls(ds=ds)
+
+
+def _match_edges(
+    ds: xr.Dataset,
+    dag: HorizontalDAG
+) -> None:
+    """Match edges from static graph to edges in DAG."""
+    breakpoint()
+
+
 def _neighborhood_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
-    max_dist_m: float = 500_000.0
+    max_dist_m: float = 500_000.0,
+    other_lon: npt.NDArray[np.floating] | None = None,
+    other_lat: npt.NDArray[np.floating] | None = None,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Build network of directed edges based on distance constraint.
 
     A pair of directed edges tail -> head is returned for each pair
     of nodes within ``max_dist_m`` of each other.
+
+    If ``other_lon`` and ``other_lat`` are provided, only returns
+    edges from points in ``lon`` and ``lat`` to points in ``other_lon``
+    and ``other_lat``.
 
     Returns
     -------
@@ -1198,11 +1382,15 @@ def _neighborhood_edges(
     head : npt.NDArray[np.int64]
         ``(m,)`` array of head indices
     """
+    if other_lon is None:
+        other_lon = lon
+    if other_lat is None:
+        other_lat = lat
     dist = geo.haversine(
         lon[:, np.newaxis],
         lat[:, np.newaxis],
-        lon[np.newaxis, :],
-        lat[np.newaxis, :],
+        other_lon[np.newaxis, :],
+        other_lat[np.newaxis, :],
     )
     return np.nonzero((dist > 0.0) & (dist <= max_dist_m))
 
@@ -1214,7 +1402,8 @@ def _dual_az_edges(
     head: npt.NDArray[np.int64],
     origin_idx: int,
     dest_idx: int,
-    max_angle_deg: float = 40.0
+    max_angle_deg: float = 40.0,
+    directed: bool = True,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
     """Filter directed edges using a dual azimuth constraint.
 
@@ -1230,6 +1419,9 @@ def _dual_az_edges(
     and away from the origin. Together, they constrain edges to lie within a
     football-shaped corridor between origin and destination and guarantee that each
     edge is forward-pointing.
+
+    If ``directed`` is ``False``, edges from tail -> head and head -> tail are
+    both considered.
 
     Returns
     -------
@@ -1254,4 +1446,19 @@ def _dual_az_edges(
     keep = (delta_tail <= max_angle_deg) & (delta_head <= max_angle_deg)
     edges = np.column_stack([tail[keep], head[keep]])
     edge_dist = geo.haversine(lon[tail[keep]], lat[tail[keep]], lon[head[keep]], lat[head[keep]])
+
+    if not directed:
+        rev_edges, rev_dist = _dual_az_edges(
+            lon=lon,
+            lat=lat,
+            tail=head,
+            head=tail,
+            origin_idx=origin_idx,
+            dest_idx=dest_idx,
+            max_angle_deg=max_angle_deg,
+            directed=True
+        )
+        edges = np.concat([edges, rev_edges])
+        edge_dist = np.concat([edge_dist, rev_dist])
+
     return edges, edge_dist

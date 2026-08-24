@@ -19,8 +19,11 @@ from contrailopt.dag import (
     AirportCoords,
     EdgeMetLookup,
     HorizontalDAG,
+    StaticMetLookup,
     Track,
     validate_flight_profile,
+    _dual_az_edges,
+    _neighborhood_edges,
 )
 from contrailopt.grid_utils import flight_profile_from_met
 
@@ -469,6 +472,7 @@ def _compute_edge_climbs(
     n_fl = len(fl_choices)
     edge_src_fi = fl_idxs[src_idx]
     edge_src_fl = fl_choices[edge_src_fi]
+    _neighborhood_edges,
     edge_src_mass = src_masses[src_idx]
 
     if met_lookup is not None:
@@ -1649,6 +1653,39 @@ def _prepare_dag(
         dag = dag.exclude_polygons(avoidance_regions)
 
     return dag
+    
+
+def _prepare_static_graph(
+    origin: AirportCoords,
+    dest: AirportCoords,
+    ds: xr.Dataset,
+    avoidance_regions: list[list[tuple[float, float]]] | None,
+    altitude_ft: npt.NDArray[np.floating],
+    takeoff_time: pd.Timestamp,
+    flight_hours: int,
+    **kwargs
+) -> tuple[HorizontalDAG, StaticMetLookup]:
+    """Return the solver's DAG and static met lookup based on a global graph."""
+    dag = HorizontalDAG.from_static_graph(
+        ds,
+        *origin.coords,
+        *dest.coords,
+        **kwargs
+    )
+
+    if avoidance_regions:
+        dag = dag.exclude_polygons(avoidance_regions)
+    dag = dag.prune_unreachable()
+
+    # create met lookup
+    met_lookup = StaticMetLookup.from_static_graph(
+        ds=ds,
+        dag=dag,
+        altitude_ft=altitude_ft,
+        takeoff_time=takeoff_time,
+        flight_hours=flight_hours
+    )
+    breakpoint()
 
 
 def _check_airport_agreement(
@@ -1743,6 +1780,7 @@ class Optimizer:
         aircraft_type: str,
         takeoff_time: pd.Timestamp,
         *,
+        static_graph: xr.Dataset | None = None,
         met: MetDataset | xr.Dataset | None = None,
         eef: xr.DataArray | MetDataArray | None = None,
         dag: HorizontalDAG | Track | None = None,
@@ -1783,19 +1821,53 @@ class Optimizer:
                     " when dollar_tonne_co2e is set"
                 )
 
-        self.dag = _prepare_dag(
-            self.origin,
-            self.dest,
-            dag,
-            avoidance_regions,
-            **kwargs,
-        )
-        self.avoidance_regions = avoidance_regions
-
         self.fl_choices = (
             fl_choices if fl_choices is not None else cruise_flight_levels(origin_icao, dest_icao)
         )
         self.mach_choices = _mach_choices(self.atyp)
+        self.avoidance_regions = avoidance_regions
+
+        # Set by from_flight: a validated (waypoint, altitude_ft) profile. When present,
+        # solve() dispatches to solve_track instead of solve_dag.
+        self.profile_ds: xr.Dataset | None = None
+
+        # Set by from_flight(use_flown_climb_descent=True): the flown climb/descent below the
+        # hand-off (lowest candidate FL) are taken as-is and only the cruise is optimized. When
+        # set, solve_track starts/ends at ``cruise_elev_ft`` (the hand-off), the DP's initial
+        # mass is reduced by the flown climb fuel, and to_flight splices the flown segments back.
+        self.cruise_elev_ft: float | None = None
+        self.prepend_flown: dict[str, npt.NDArray] | None = None
+        self.append_flown: dict[str, npt.NDArray] | None = None
+
+        self.result: DAGResult | None = None
+
+        # Prepare DAG and meteorology from static graph if provided (most performance)
+        if static_graph is not None:
+            flight_hours = flight_hours or estimate_flight_hours(
+                self.origin, self.dest, self.atyp.m_des
+            )
+            dag, met_lookup = _prepare_static_graph(
+                self.origin,
+                self.dest,
+                static_graph,
+                avoidance_regions=self.avoidance_regions,
+                altitude_ft=self.fl_choices,
+                takeoff_time=self.takeoff_time,
+                flight_hours=flight_hours,
+                **kwargs
+            )
+            self.dag = dag
+            self.met_lookup = met_lookup
+            return
+
+        # Otherwise, fall back to dynamic methods (less efficient)
+        self.dag = _prepare_dag(
+            self.origin,
+            self.dest,
+            dag,
+            self.avoidance_regions,
+            **kwargs,
+        )
 
         if met is not None:
             flight_hours = flight_hours or estimate_flight_hours(
@@ -1816,19 +1888,7 @@ class Optimizer:
         else:
             self.met_lookup = None
 
-        # Set by from_flight: a validated (waypoint, altitude_ft) profile. When present,
-        # solve() dispatches to solve_track instead of solve_dag.
-        self.profile_ds: xr.Dataset | None = None
 
-        # Set by from_flight(use_flown_climb_descent=True): the flown climb/descent below the
-        # hand-off (lowest candidate FL) are taken as-is and only the cruise is optimized. When
-        # set, solve_track starts/ends at ``cruise_elev_ft`` (the hand-off), the DP's initial
-        # mass is reduced by the flown climb fuel, and to_flight splices the flown segments back.
-        self.cruise_elev_ft: float | None = None
-        self.prepend_flown: dict[str, npt.NDArray] | None = None
-        self.append_flown: dict[str, npt.NDArray] | None = None
-
-        self.result: DAGResult | None = None
 
     @classmethod
     def from_flight(
