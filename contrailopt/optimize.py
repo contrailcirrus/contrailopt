@@ -22,10 +22,8 @@ from contrailopt.dag import (
     AirportCoords,
     EdgeMetLookup,
     HorizontalDAG,
-    StaticMetLookup,
     Track,
     validate_flight_profile,
-    _dual_az_edges,
     _neighborhood_edges,
 )
 from contrailopt.grid_utils import flight_profile_from_met
@@ -57,8 +55,7 @@ _WAYPOINT_DTYPE = np.dtype(
         ("mach_number", FLOAT_DTYPE),
         ("eef_per_m", FLOAT_DTYPE),
         ("air_temperature", FLOAT_DTYPE),
-        ("eastward_wind", FLOAT_DTYPE),
-        ("northward_wind", FLOAT_DTYPE),
+        ("tailwind", FLOAT_DTYPE),
         ("node_index", np.int64),
         ("sample_index", np.int64),
     ]
@@ -284,8 +281,7 @@ def _calculate_cruise_at_samples(
     mass_3d = post_climb_mass[sample_to_edge][:, :, np.newaxis]
 
     # Along-track wind component
-    az = met_lookup.sample_azimuth[sample_idxs][:, np.newaxis]
-    tailwind = sample_met.eastward_wind * np.sin(az) + sample_met.northward_wind * np.cos(az)
+    tailwind = -sample_met.headwind
 
     # Weight by cruise-zone overlap, then reduce to per-edge totals
     weight = _cruise_zone_weights(
@@ -537,10 +533,7 @@ def _compute_edge_climbs(
         isa_T = units.m_to_T_isa(units.ft_to_m(edge_src_fl))
         delta_isa = (met_T - isa_T)[:, np.newaxis]
 
-        az = met_lookup.sample_azimuth[edge_start]
-        u = climb_met.eastward_wind[edge_arange, edge_src_fi]
-        v = climb_met.northward_wind[edge_arange, edge_src_fi]
-        tailwind = (u * np.sin(az) + v * np.cos(az))[:, np.newaxis]
+        tailwind = -climb_met.headwind
     else:
         delta_isa = 0.0
         tailwind = 0.0
@@ -626,10 +619,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             isa_T = units.m_to_T_isa(units.ft_to_m(base_alt))
             delta_isa = (met_T - isa_T)[:, np.newaxis]
 
-            az = ctx.met_lookup.sample_azimuth[edge_start]
-            u = climb_met.eastward_wind[:, 0]
-            v = climb_met.northward_wind[:, 0]
-            tailwind = (u * np.sin(az) + v * np.cos(az))[:, np.newaxis]
+            tailwind = -climb_met.headwind
         else:
             delta_isa = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
             tailwind = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
@@ -1729,7 +1719,7 @@ def _prepare_dag(
         dag = dag.exclude_polygons(avoidance_regions)
 
     return dag
-    
+
 
 def _prepare_static_graph(
     origin: AirportCoords,
@@ -1740,12 +1730,13 @@ def _prepare_static_graph(
     takeoff_time: pd.Timestamp,
     flight_hours: int,
     **kwargs
-) -> tuple[HorizontalDAG, StaticMetLookup]:
+) -> tuple[HorizontalDAG, EdgeMetLookup]:
     """Return the solver's DAG and static met lookup based on a global graph."""
     dag = HorizontalDAG.from_static_graph(
         ds,
         *origin.coords,
         *dest.coords,
+        dtype=FLOAT_DTYPE,
         **kwargs
     )
 
@@ -1753,15 +1744,15 @@ def _prepare_static_graph(
         dag = dag.exclude_polygons(avoidance_regions)
     dag = dag.prune_unreachable()
 
-    # create met lookup
-    met_lookup = StaticMetLookup.from_static_graph(
+    met_lookup = EdgeMetLookup.from_static_graph(
         ds=ds,
         dag=dag,
         altitude_ft=altitude_ft,
         takeoff_time=takeoff_time,
         flight_hours=flight_hours
     )
-    breakpoint()
+
+    return dag, met_lookup
 
 
 def _check_airport_agreement(
@@ -2549,7 +2540,7 @@ class Optimizer:
         out["mach_number"] = leg_mach
         out["eef_per_m"] = eef
         out["air_temperature"] = ds["air_temperature"].values[nodes, cruise_fi]
-        out["eastward_wind"] = ds["u_wind"].values[nodes, cruise_fi]
+        out["tailwind"] = -ds["headwind"].values[nodes, cruise_fi]
         out["northward_wind"] = ds["v_wind"].values[nodes, cruise_fi]
         out["node_index"] = nodes
         out["sample_index"] = nodes
@@ -2617,8 +2608,7 @@ class Optimizer:
             out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
         out["eef_per_m"] = eef_per_m
         out["air_temperature"] = interp.air_temperature[:, 0]
-        out["eastward_wind"] = interp.eastward_wind[:, 0]
-        out["northward_wind"] = interp.northward_wind[:, 0]
+        out["tailwind"] = interp.headwind[:, 0]
         out["node_index"] = -1
         if not skip_first:
             out["node_index"][0] = h_src
@@ -2841,8 +2831,7 @@ class Optimizer:
         data = {
             "mach_number": wpts["mach_number"],
             "air_temperature": wpts["air_temperature"],
-            "u_wind": wpts["eastward_wind"],  # use u/v names for pycontrails compatibility
-            "v_wind": wpts["northward_wind"],
+            "tailwind": wpts["tailwind"],
             "node_index": wpts["node_index"],
             "sample_index": wpts["sample_index"],
         }
@@ -2864,8 +2853,7 @@ class Optimizer:
             for key, fill in (
                 ("mach_number", np.nan),
                 ("air_temperature", np.nan),
-                ("u_wind", np.nan),
-                ("v_wind", np.nan),
+                ("tailwind", np.nan),
                 ("eef_per_m", np.nan),
                 ("node_index", -1),
                 ("sample_index", -1),
@@ -2890,7 +2878,6 @@ class Optimizer:
         altitude_ft: float | None = None,
         time: pd.Timestamp | None = None,
         ax: "GeoAxes | None" = None,
-        show_wind_quiver: bool = True,
         show_eef: bool = True,
         **kwargs,
     ) -> "GeoAxes":
@@ -2952,8 +2939,6 @@ class Optimizer:
             sel = ds.sel(altitude_ft=altitude_ft, method="nearest")
             node_lon = self.dag.lon
             node_lat = self.dag.lat
-            u = sel["u_wind"].values
-            v = sel["v_wind"].values
             eef = sel["eef_per_m"].values if "eef_per_m" in ds else None
             sel_time = None
         else:
@@ -2968,17 +2953,8 @@ class Optimizer:
             node_sample_idx = self.met_lookup.edge_ptr[self.dag.adj_ptr[:-1][has_edges]]
             node_lon = self.dag.lon[has_edges]
             node_lat = self.dag.lat[has_edges]
-            u = sel.eastward_wind.values[node_sample_idx]
-            v = sel.northward_wind.values[node_sample_idx]
             eef = sel.eef_per_m.values[node_sample_idx] if "eef_per_m" in ds else None
             sel_time = pd.Timestamp(sel["time"].item())
-
-        if show_wind_quiver:
-            kwargs.setdefault("alpha", 0.6)
-            kwargs.setdefault("headwidth", 2)
-            kwargs.setdefault("headlength", 2)
-            kwargs.setdefault("headaxislength", 1.5)
-            ax.quiver(node_lon, node_lat, u, v, transform=ax.projection, **kwargs)
 
         if show_eef and eef is not None:
             finite = np.isfinite(eef)
