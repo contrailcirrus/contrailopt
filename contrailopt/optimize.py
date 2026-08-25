@@ -1919,7 +1919,7 @@ class Optimizer:
 
         self.result: DAGResult | None = None
 
-        # Prepare DAG and meteorology from static graph if provided (most performance)
+        # Prepare DAG and meteorology from static graph if provided
         if static_graph is not None:
             flight_hours = flight_hours or estimate_flight_hours(
                 self.origin, self.dest, self.atyp.m_des
@@ -1938,7 +1938,7 @@ class Optimizer:
             self.met_lookup = met_lookup
             return
 
-        # Otherwise, fall back to dynamic methods (less efficient)
+        # Otherwise, fall back to dynamic graph generation
         self.dag = _prepare_dag(
             self.origin,
             self.dest,
@@ -2434,7 +2434,6 @@ class Optimizer:
         skip_first: bool,
     ) -> npt.NDArray[_SEGMENT_DTYPE]:
         """Emit segments with cost data by resampling a single edge."""
-        met_lookup = self.met_lookup
         state = self.result.state
         dag = self.dag
 

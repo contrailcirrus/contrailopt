@@ -223,11 +223,11 @@ class HorizontalDAG:
 
     def outgoing_edges(self, src: int) -> npt.NDArray[np.int64]:
         """Return the indices of all edges leaving a node."""
-        return np.asarray([self.edge_index(src, dst) for dst in self.neighbors(src)])
+        return np.flatnonzero(self.edges[:, 0] == src)
 
     def incoming_edges(self, dst: int) -> npt.NDArray[np.int64]:
         """Return the indices of all edges ending at a node."""
-        return self.reverse().outgoing_edges(dst)
+        return np.flatnonzero(self.edges[:, 1] == dst)
 
     def neighbors_batch(self, nodes: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
         """Return neighbors (duplicates included with multiplicity) for a batch of nodes."""
@@ -640,7 +640,7 @@ class HorizontalDAG:
         origin_idx: int = 0,
         dest_idx: int = -1,
         max_angle_deg: float = 40.0,
-        directed: bool = False,
+        directed: bool = True,
     ) -> Self:
         """Build a DAG from a directed network graph using the dual azimuth constraint."""
         edges, dists = _dual_az_edges(
@@ -1283,6 +1283,7 @@ class EdgeMetLookup:
         rev_mask = (rev_map >= 0)
 
         # Static graph is used to generate aggregated met lookup with two samples per edge
+        # TODO: are two samples necessary?
         n_edges = edge_map.size
         sample_lon = np.empty((2 * n_edges), dtype=dag.lon.dtype)
         sample_lon[::2] = lon[tail[edge_map]]
@@ -1325,8 +1326,8 @@ class EdgeMetLookup:
         ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
 
         # Fill departure routes by averaging over edges leaving node at end of departure
-        idep = np.flatnonzero(dag.edge_src == dag.n_nodes - 2)
-        iarr = np.flatnonzero(dag.adj == dag.n_nodes - 1)
+        idep = np.flatnonzero(dag.edge_src == dag.h_origin)
+        iarr = np.flatnonzero(dag.adj == dag.h_dest)
         for v in variables:
             data = ds[v].values
             for i in idep:
