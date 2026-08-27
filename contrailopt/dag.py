@@ -11,7 +11,7 @@ import pandas as pd
 import xarray as xr
 from pycontrails import MetDataArray, MetDataset
 from pycontrails.core import airports
-from pycontrails.physics import geo
+from pycontrails.physics import geo, units
 
 from contrailopt.grid_utils import (
     bilinear_interp,
@@ -1325,30 +1325,14 @@ class EdgeMetLookup:
         mask = ~rev_mask[:, np.newaxis, np.newaxis]
         ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
 
-        # Fill departure routes by averaging over edges leaving node at end of departure
-        idep = np.flatnonzero(dag.edge_src == dag.h_origin)
-        iarr = np.flatnonzero(dag.adj == dag.h_dest)
-        for v in variables:
-            data = ds[v].values
-            for i in idep:
-                iout = dag.outgoing_edges(dag.adj[i])
-                data[i, :, :] = data[iout, :, :].mean(axis=0)
-            for i in iarr:
-                iin = dag.incoming_edges(dag.edge_src[i])
-                data[i, :, :] = data[iin, :, :].mean(axis=0)
-            ds[v] = ds[v].fillna(data)
-
-        # Reset and rename edge index
-        ds = ds.assign_coords(edge_index=np.arange(n_edges)).rename(edge_index="edge")
-
-        # Raise on NaN in meteorology - downstream computations would be poisoned.
+        # Fill departure and arrival routes
+        altitude_m = units.pl_to_m(ds["level"])
         variables = ["air_temperature", "headwind"]
+        ds["air_temperature"] = ds["air_temperature"].fillna(units.m_to_T_isa(altitude_m))
+        ds["headwind"] = ds["headwind"].fillna(0.0)
         if "eef_per_m" in ds:
             variables.append("eef_per_m")
-
-        for var in variables:
-            if ds[var].isnull().any():
-                raise ValueError(f"NaN values found in '{var}' after interpolation onto samples")
+            ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
         ds = ds[variables]
 
         return cls(
