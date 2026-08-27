@@ -1325,6 +1325,9 @@ class EdgeMetLookup:
             ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
         ds = ds[variables]
 
+        # Reset and rename edge index
+        ds = ds.assign_coords(edge_index=np.arange(n_edges)).rename(edge_index="edge")
+
         return cls(
             ds=ds,
             edge_ptr=edge_ptr,
