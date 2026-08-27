@@ -1316,14 +1316,12 @@ class EdgeMetLookup:
         ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
 
         # Fill departure and arrival routes
-        altitude_m = units.pl_to_m(ds["level"])
-        variables = ["air_temperature", "headwind"]
-        ds["air_temperature"] = ds["air_temperature"].fillna(units.m_to_T_isa(altitude_m))
+        altitude_m = units.ft_to_m(ds["altitude_ft"])
+        t_isa = units.m_to_T_isa(altitude_m).astype(ds["air_temperature"].dtype)
+        ds["air_temperature"] = ds["air_temperature"].fillna(t_isa)
         ds["headwind"] = ds["headwind"].fillna(0.0)
         if "eef_per_m" in ds:
-            variables.append("eef_per_m")
             ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
-        ds = ds[variables]
 
         # Reset and rename edge index
         ds = ds.assign_coords(edge_index=np.arange(n_edges)).rename(edge_index="edge")
