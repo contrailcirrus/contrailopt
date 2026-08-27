@@ -1257,6 +1257,8 @@ class EdgeMetLookup:
         altitude_ft: npt.NDArray[np.floating],
         takeoff_time: pd.Timestamp,
         flight_hours: int,
+        met: xr.Dataset | None = None,
+        spacing_m: float = 25_000.0,
     ) -> Self:
         """Construct lookup from static graph."""
         # Build MultiIndex to identify static edges based on endpoints.
@@ -1324,17 +1326,52 @@ class EdgeMetLookup:
         # Reverse headwind where needed
         mask = ~rev_mask[:, np.newaxis, np.newaxis]
         ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
+        # Reset and rename edge index
+
+        ds = ds.assign_coords(edge_index=np.arange(n_edges)).rename(edge_index="edge")
 
         # Fill departure and arrival routes
-        altitude_m = units.ft_to_m(ds["altitude_ft"])
-        t_isa = units.m_to_T_isa(altitude_m).astype(ds["air_temperature"].dtype)
-        ds["air_temperature"] = ds["air_temperature"].fillna(t_isa)
-        ds["headwind"] = ds["headwind"].fillna(0.0)
-        if "eef_per_m" in ds:
-            ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
+        # Use met, if provided, with specified sampling rate
+        if met is not None:
+            usable = select_flight_times(met, takeoff_time, flight_hours)
+            met = met.sel(time=usable)
+            met = to_altitude_ft(met, altitude_ft)
+            fill = _fill_from_gridded_met(ds, dag, met, spacing_m)
+            ds = ds.fillna(fill)
 
-        # Reset and rename edge index
-        ds = ds.assign_coords(edge_index=np.arange(n_edges)).rename(edge_index="edge")
+            # Raise on NaN in core weather - downstream computations would be poisoned.
+            variables = ["air_temperature", "headwind"]
+            for var in variables:
+                if ds[var].isnull().any():
+                    msg = (
+                        f"NaN values found in '{var}' "
+                        "after filling missing edges with gridded met data"
+                    )
+                    raise ValueError(msg)
+
+            # NaN-fill eef_per_m with 0.0 if not provided in gridded met.
+            # Otherwise, raise on NaN in eef_per_m.
+            if "eef_per_m" in ds:
+                if "eef_per_m" in met and ds["eef_per_m"].isnull().any():
+                    msg = (
+                        "NaN values found in 'eef_per_m' "
+                        "after filling missing edges with gridded met data"
+                    )
+                    raise ValueError(msg)
+                ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
+                variables.append("eef_per_m")
+
+            ds = ds[variables]
+
+        # Fill with ISA temperature, zero wind, zero EF otherwise
+        else:
+            altitude_m = units.ft_to_m(ds["altitude_ft"])
+            t_isa = units.m_to_T_isa(altitude_m).astype(ds["air_temperature"].dtype)
+            ds["air_temperature"] = ds["air_temperature"].fillna(t_isa)
+            ds["headwind"] = ds["headwind"].fillna(0.0)
+            if "eef_per_m" in ds:
+                ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
+
 
         return cls(
             ds=ds,
@@ -1345,6 +1382,70 @@ class EdgeMetLookup:
             cum_dist=cum_dist,
             delta_dist=delta_dist,
         )
+
+
+def _fill_from_gridded_met(
+    ds: xr.Dataset,
+    dag: HorizontalDAG,
+    met: xr.Dataset,
+    spacing_m: float,
+) -> xr.Dataset:
+    """Fill missing edges using gridded met data."""
+    # Ensure variables
+    variables = ["air_temperature", "eastward_wind", "northward_wind"]
+    if "eef_per_m" in met:
+        variables.append("eef_per_m")
+    met = met[variables]
+
+    missing = ds.isnull().all(["altitude_ft", "time"]).to_array().all("variable")
+    sample_lon, sample_lat, edge_idx, _ = dag.sample_edges(spacing_m)
+    mask = np.isin(edge_idx, np.flatnonzero(missing))
+    sample_lon = sample_lon[mask]
+    sample_lat = sample_lat[mask]
+    met = bilinear_interp(met, sample_lon, sample_lat)
+
+    # Compute distance from edge source to each sample
+    edge_idx = edge_idx[mask]
+    edge_ptr = np.zeros(int(missing.sum()) + 1, dtype=np.int64)
+    edge_ptr[1:-1] = np.flatnonzero(np.diff(edge_idx))
+    edge_ptr[-1] = edge_idx.size
+    edge_src = dag.edge_src[edge_idx]
+    src_lon = dag.lon[edge_src]
+    src_lat = dag.lat[edge_src]
+    cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
+    cum_dist[edge_ptr[:-1]] = 0.0  # defensive, not strictly needed
+
+    # Compute distance and azimuth from one sample to the next (used for wind calcs)
+    last = edge_ptr[1:] - 1
+    delta_dist = np.empty_like(cum_dist)
+    delta_dist[:-1] = np.diff(cum_dist)
+    delta_dist[last] = 0.0
+    sample_azimuth = np.empty_like(cum_dist)
+    sample_azimuth[:-1] = np.deg2rad(
+        geo.azimuth(sample_lon[:-1], sample_lat[:-1], sample_lon[1:], sample_lat[1:])
+    )
+    sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
+
+    # Compute headwind component from vector winds
+    az = sample_azimuth[:, np.newaxis, np.newaxis]
+    met["headwind"] = -(met["eastward_wind"] * np.sin(az) + met["northward_wind"] * np.cos(az))
+
+    # Aggregate
+    edge_idx_da = xr.DataArray(data=edge_idx, coords=met["sample"].coords)
+    delta_dist_da = xr.DataArray(data=delta_dist, coords=met["sample"].coords)
+    cum_dist_da = delta_dist_da.groupby(edge_idx_da).sum()
+
+    variables = ["air_temperature", "headwind"]
+    if "eef_per_m" in met:
+        variables.append("eef_per_m")
+
+    fill = xr.Dataset()
+    for var in variables:
+        da = (met[var] * delta_dist_da).groupby(edge_idx_da).sum() / cum_dist_da
+        da = da.rename(group="edge")
+        fill[var] = da
+
+    return fill
 
 
 def _neighborhood_edges(

@@ -1725,6 +1725,7 @@ def _prepare_static_graph(
     origin: AirportCoords,
     dest: AirportCoords,
     ds: xr.Dataset,
+    met: xr.Dataset | None,
     avoidance_regions: list[list[tuple[float, float]]] | None,
     altitude_ft: npt.NDArray[np.floating],
     takeoff_time: pd.Timestamp,
@@ -1749,7 +1750,8 @@ def _prepare_static_graph(
         dag=dag,
         altitude_ft=altitude_ft,
         takeoff_time=takeoff_time,
-        flight_hours=flight_hours
+        flight_hours=flight_hours,
+        met=met
     )
 
     return dag, met_lookup
@@ -1928,6 +1930,7 @@ class Optimizer:
                 self.origin,
                 self.dest,
                 static_graph,
+                met,
                 avoidance_regions=self.avoidance_regions,
                 altitude_ft=self.fl_choices,
                 takeoff_time=self.takeoff_time,
