@@ -601,7 +601,7 @@ class HorizontalDAG:
         static_lat = ds["lat"].values
         static_tail = ds["tail"].values
         static_head = ds["head"].values
-        n_nodes = static_lon.size
+        n_nodes = ds.sizes["node"]
 
         # origin and destination are second-to-last and last nodes
         # avoids needing to update existing tail and head indexes
@@ -1321,22 +1321,27 @@ class EdgeMetLookup:
         ds = to_altitude_ft(ds, altitude_ft)
 
         # Reindex edges to align with DAG and load into memory
-        ds = ds.reindex(edge_index=edge_map).compute()
+        ds = ds.reindex(edge=edge_map).compute()
 
         # Reverse headwind where needed
         mask = ~rev_mask[:, np.newaxis, np.newaxis]
         ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
         # Reset and rename edge index
 
-        ds = ds.assign_coords(edge_index=np.arange(n_edges)).rename(edge_index="edge")
+        ds = ds.assign_coords(edge=np.arange(n_edges))
 
         # Fill departure and arrival routes
         # Use met, if provided, with specified sampling rate
         if met is not None:
-            usable = select_flight_times(met, takeoff_time, flight_hours)
-            met = met.sel(time=usable)
-            met = to_altitude_ft(met, altitude_ft)
-            fill = _fill_from_gridded_met(ds, dag, met, spacing_m)
+            fill = _fill_from_gridded_met(
+                ds,
+                dag,
+                met,
+                altitude_ft,
+                takeoff_time,
+                flight_hours,
+                spacing_m
+            )
             ds = ds.fillna(fill)
 
             # Raise on NaN in core weather - downstream computations would be poisoned.
@@ -1388,64 +1393,48 @@ def _fill_from_gridded_met(
     ds: xr.Dataset,
     dag: HorizontalDAG,
     met: xr.Dataset,
+    altitude_ft: npt.NDArray[np.floating],
+    takeoff_time: pd.Timestamp,
+    flight_hours: int,
     spacing_m: float,
 ) -> xr.Dataset:
     """Fill missing edges using gridded met data."""
-    # Ensure variables
-    variables = ["air_temperature", "eastward_wind", "northward_wind"]
-    if "eef_per_m" in met:
-        variables.append("eef_per_m")
-    met = met[variables]
-
+    # Construct subset of DAG with missing edges only
     missing = ds.isnull().all(["altitude_ft", "time"]).to_array().all("variable")
-    sample_lon, sample_lat, edge_idx, _ = dag.sample_edges(spacing_m)
-    mask = np.isin(edge_idx, np.flatnonzero(missing))
-    sample_lon = sample_lon[mask]
-    sample_lat = sample_lat[mask]
-    met = bilinear_interp(met, sample_lon, sample_lat)
+    tail = dag.edge_src[missing]
+    head = dag.adj[missing]
+    edges = np.stack((tail, head))
 
-    # Compute distance from edge source to each sample
-    edge_idx = edge_idx[mask]
-    edge_ptr = np.zeros(int(missing.sum()) + 1, dtype=np.int64)
-    edge_ptr[1:-1] = np.flatnonzero(np.diff(edge_idx))
-    edge_ptr[-1] = edge_idx.size
-    edge_src = dag.edge_src[edge_idx]
-    src_lon = dag.lon[edge_src]
-    src_lat = dag.lat[edge_src]
-    cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
-    cum_dist[edge_ptr[:-1]] = 0.0  # defensive, not strictly needed
+    inode, reindexed = np.unique(edges, return_inverse=True)
+    lon = dag.lon[inode]
+    lat = dag.lat[inode]
+    tail = reindexed[0,:]
+    head = reindexed[1,:]
 
-    # Compute distance and azimuth from one sample to the next (used for wind calcs)
-    last = edge_ptr[1:] - 1
-    delta_dist = np.empty_like(cum_dist)
-    delta_dist[:-1] = np.diff(cum_dist)
-    delta_dist[last] = 0.0
-    sample_azimuth = np.empty_like(cum_dist)
-    sample_azimuth[:-1] = np.deg2rad(
-        geo.azimuth(sample_lon[:-1], sample_lat[:-1], sample_lon[1:], sample_lat[1:])
+    subdag = HorizontalDAG.from_network(
+        lon=lon,
+        lat=lat,
+        tail=tail,
+        head=head,
+        origin_idx=0,           # unused
+        dest_idx=1,             # unused
+        max_angle_deg=np.inf,   # no filtering by orientation
+        directed=True
     )
-    sample_azimuth[last] = sample_azimuth[last - 1]  # copy previous azimuth for last sample
 
-    # Compute headwind component from vector winds
-    az = sample_azimuth[:, np.newaxis, np.newaxis]
-    met["headwind"] = -(met["eastward_wind"] * np.sin(az) + met["northward_wind"] * np.cos(az))
+    # Fill using aggregated met lookup on sub-DAG
+    fill = EdgeMetLookup.from_met(
+        met=met,
+        dag=subdag,
+        altitude_ft=altitude_ft,
+        takeoff_time=takeoff_time,
+        flight_hours=flight_hours,
+        spacing_m=spacing_m,
+        eef=None
+    ).aggregate().ds
 
-    # Aggregate
-    edge_idx_da = xr.DataArray(data=edge_idx, coords=met["sample"].coords)
-    delta_dist_da = xr.DataArray(data=delta_dist, coords=met["sample"].coords)
-    cum_dist_da = delta_dist_da.groupby(edge_idx_da).sum()
-
-    variables = ["air_temperature", "headwind"]
-    if "eef_per_m" in met:
-        variables.append("eef_per_m")
-
-    fill = xr.Dataset()
-    for var in variables:
-        da = (met[var] * delta_dist_da).groupby(edge_idx_da).sum() / cum_dist_da
-        da = da.rename(group="edge")
-        fill[var] = da
-
-    return fill
+    # Update edge coordinate to match full DAG
+    return fill.assign_coords(missing[missing].coords)
 
 
 def _neighborhood_edges(
