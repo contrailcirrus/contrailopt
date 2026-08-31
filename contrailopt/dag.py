@@ -1072,10 +1072,16 @@ class EdgeMetLookup:
         ds = xr.Dataset(self.ds.coords).rename(sample="edge")
         ds["edge"] = np.arange(n_edges)
         edge_idx_da = xr.DataArray(data=self.edge_idx, coords=self.ds["sample"].coords)
-        delta_dist_da = xr.DataArray(data=self.delta_dist, coords=self.ds["sample"].coords)
-        cum_dist_da = delta_dist_da.groupby(edge_idx_da).sum()
+
+        # compute weights for trapezoidal integration
+        weight = np.zeros((self.ds.sizes["sample"]), dtype=self.delta_dist.dtype)
+        weight[1:] = self.delta_dist[:-1] + self.delta_dist[1:]
+        weight[0] = self.delta_dist[0]
+        weight_da = xr.DataArray(data=weight, coords=self.ds["sample"].coords)
+        norm_da = weight_da.groupby(edge_idx_da).sum()
+
         for key, var in self.ds.data_vars.items():
-            new_var = (var * delta_dist_da).groupby(edge_idx_da).sum() / cum_dist_da
+            new_var = (var * weight_da).groupby(edge_idx_da).sum() / norm_da
             new_var = new_var.rename(group="edge")
             ds[key] = new_var
 
@@ -1286,14 +1292,14 @@ class EdgeMetLookup:
 
         # Static graph is used to generate aggregated met lookup with two samples per edge
         # TODO: are two samples necessary?
-        n_edges = edge_map.size
-        sample_lon = np.empty((2 * n_edges), dtype=dag.lon.dtype)
-        sample_lon[::2] = lon[tail[edge_map]]
-        sample_lon[1::2] = lon[head[edge_map]]
+        n_edges = dag.n_edges
+        sample_lon = np.empty((2 * dag.n_edges), dtype=dag.lon.dtype)
+        sample_lon[::2] = dag.lon[dag.edge_src]
+        sample_lon[1::2] = dag.lon[dag.adj]
 
         sample_lat = np.empty((2 * n_edges), dtype=dag.lat.dtype)
-        sample_lat[::2] = lat[tail[edge_map]]
-        sample_lat[1::2] = lat[head[edge_map]]
+        sample_lat[::2] = dag.lat[dag.edge_src]
+        sample_lat[1::2] = dag.lat[dag.adj]
 
         edge_idx = np.repeat(np.arange(n_edges), 2)
         edge_ptr = np.arange(0, 2 * n_edges + 1, 2)
@@ -1326,8 +1332,8 @@ class EdgeMetLookup:
         # Reverse headwind where needed
         mask = ~rev_mask[:, np.newaxis, np.newaxis]
         ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
-        # Reset and rename edge index
 
+        # Reset edge index
         ds = ds.assign_coords(edge=np.arange(n_edges))
 
         # Fill departure and arrival routes
