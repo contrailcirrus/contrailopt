@@ -9,10 +9,12 @@ import xarray as xr
 from pycontrails import Flight
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.models.ps_model.ps_aircraft_params import PSAircraftEngineParams as PSParams
+from pycontrails.physics import jet
 
 from contrailopt.dag import AirportCoords, HorizontalDAG
 from contrailopt.optimize import (
     FLOAT_DTYPE,
+    MASS_CONVERGENCE_KG,
     DAGState,
     Optimizer,
     _climbing_fl_idxs,
@@ -689,6 +691,25 @@ class TestOptimizer:
         assert result.amass_init <= opt.atyp.amass_mtow
         assert result.landing_mass > opt.atyp.amass_oew
         assert result.landing_mass < opt.atyp.amass_mlw
+
+    def test_landing_mass_is_the_solved_arrival_mass(self) -> None:
+        """The landing mass is what the solve arrived at, so the three masses agree."""
+        opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"))
+        result = opt.solve(payload=15_000.0)
+        assert result.landing_mass == pytest.approx(result.amass_init - result.trip_fuel)
+
+    def test_landing_mass_is_the_fuel_the_aircraft_planned_to_land_with(self) -> None:
+        """The aircraft lands on its reserve, to within the convergence tolerance."""
+        opt = Optimizer("KJFK", "KORD", "A320", pd.Timestamp("2024-06-01"))
+        result = opt.solve(payload=15_000.0)
+        planned = jet.initial_aircraft_mass(
+            amass_oew=opt.atyp.amass_oew,
+            amass_mtow=opt.atyp.amass_mtow,
+            payload=result.payload,
+            total_fuel_burn=0.0,
+            total_reserve_fuel=result.reserve_fuel,
+        )
+        assert result.landing_mass == pytest.approx(planned, abs=MASS_CONVERGENCE_KG)
 
     def test_to_flight(self) -> None:
         """The to_flight returns a Flight with expected structure."""
