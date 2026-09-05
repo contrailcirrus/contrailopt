@@ -562,7 +562,7 @@ class TestEstimateMass:
         """Explicit payload is passed through unchanged."""
         origin = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13)
         dest = AirportCoords(icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128)
-        payload, reserve_fuel = _estimate_mass(
+        payload, reserve_fuel, trip_fuel = _estimate_mass(
             payload=15_000.0,
             origin=origin,
             dest=dest,
@@ -572,12 +572,13 @@ class TestEstimateMass:
         )
         assert payload == 15_000.0
         assert reserve_fuel > 0.0
+        assert trip_fuel > 0.0
 
     def test_estimated_payload(self, atyp: PSParams) -> None:
         """Estimated payload from pycontrails is positive."""
         origin = AirportCoords(icao_code="KJFK", longitude=-73.78, latitude=40.64, elevation_ft=13)
         dest = AirportCoords(icao_code="KLAX", longitude=-118.41, latitude=33.94, elevation_ft=128)
-        payload, reserve_fuel = _estimate_mass(
+        payload, reserve_fuel, trip_fuel = _estimate_mass(
             payload=None,
             origin=origin,
             dest=dest,
@@ -587,6 +588,7 @@ class TestEstimateMass:
         )
         assert payload > 0.0
         assert reserve_fuel > 0.0
+        assert trip_fuel > 0.0
 
 
 class TestCruiseFlightLevels:

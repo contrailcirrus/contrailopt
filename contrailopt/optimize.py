@@ -49,6 +49,9 @@ _WAYPOINT_DTYPE = np.dtype(
     ]
 )
 
+# Takeoff mass tolerance for the convergence loop in Optimizer.solve.
+MASS_CONVERGENCE_KG = 20.0
+
 # IPCC AR5 reference AGWP100: https://www.ipcc.ch/site/assets/uploads/2018/07/WGI_AR5.Chap_.8_SM.pdf
 _AGWP_CO2 = 91.7e-15  # W m-2 yr kg-1
 _SECONDS_PER_YEAR = 60 * 60 * 24 * 365  # s yr-1
@@ -1552,11 +1555,14 @@ def _estimate_mass(
     takeoff_time: pd.Timestamp,
     aircraft_type: str,
     atyp: ps_aircraft_params.PSAircraftEngineParams,
-) -> tuple[float, float]:
-    """Estimate payload and reserve fuel.
+) -> tuple[float, float, float]:
+    """Estimate payload, reserve fuel and trip fuel.
 
-    Reserve fuel is 90 minutes of cruise fuel flow at a mid-range FL and mass,
-    following the approach in ``pycontrails.models.ps_model.ps_grid``.
+    Reserve fuel follows :func:`pycontrails.physics.jet.reserve_fuel_requirements` (we
+    can't call that function directly because it needs a flown trajectory).
+    Specifically, this function computes reserve fuel as the larger of:
+        - 90 minutes of cruise fuel burn at the end-of-cruise mass, or
+        - 15% of the total trip fuel
     """
     if payload is None:
         pax_lf = jet.passenger_load_factor(origin.icao_code, takeoff_time)
@@ -1575,14 +1581,25 @@ def _estimate_mass(
     # 90 min of cruise ff at mid-range FL and mass
     mid_fl = 35_000.0
     T_isa = units.m_to_T_isa(units.ft_to_m(mid_fl))
-    est_mass = atyp.amass_oew + payload + 0.5 * (atyp.amass_mtow - atyp.amass_oew)
-    ff, feasible = ps.cruise_performance(mid_fl, atyp.m_des, est_mass, T_isa, atyp)
-    if not feasible:
-        raise RuntimeError("Mid-range cruise should be feasible for mass estimation")
+    reserve_fuel = 0.0
+    for _ in range(3):
+        landing_mass = jet.initial_aircraft_mass(
+            amass_oew=atyp.amass_oew,
+            amass_mtow=atyp.amass_mtow,
+            payload=payload,
+            total_fuel_burn=0.0,
+            total_reserve_fuel=reserve_fuel,
+        )
+        ff, feasible = ps.cruise_performance(mid_fl, atyp.m_des, landing_mass, T_isa, atyp)
+        if not feasible:
+            raise RuntimeError("Mid-range cruise should be feasible for mass estimation")
+        trip_fuel = _estimate_trip_fuel(origin, dest, atyp, landing_mass)
 
-    reserve_fuel = ff.item() * 90.0 * 60.0  # kg/s -> kg for 90 minutes
+        holding_fuel = ff.item() * 90.0 * 60.0  # kg/s -> kg for 90 minutes
+        contingency_fuel = 0.15 * trip_fuel
+        reserve_fuel = max(holding_fuel, contingency_fuel)
 
-    return payload, reserve_fuel
+    return payload, reserve_fuel, trip_fuel
 
 
 def _fl_choices(origin: AirportCoords, dest: AirportCoords) -> npt.NDArray[FLOAT_DTYPE]:
@@ -2169,7 +2186,7 @@ class Optimizer:
             self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
             self.mach_choices = _mach_choices(self.atyp)
 
-        payload, reserve_fuel = _estimate_mass(
+        payload, reserve_fuel, fuel_estimate = _estimate_mass(
             payload,
             self.origin,
             self.dest,
@@ -2177,10 +2194,13 @@ class Optimizer:
             self.aircraft_type,
             self.atyp,
         )
-        landing_mass = self.atyp.amass_oew + payload + reserve_fuel
-
-        fuel_estimate = _estimate_trip_fuel(self.origin, self.dest, self.atyp, landing_mass)
-        amass_init = min(landing_mass + fuel_estimate, self.atyp.amass_mtow)
+        mass_kwargs = {
+            "amass_oew": self.atyp.amass_oew,
+            "amass_mtow": self.atyp.amass_mtow,
+            "payload": payload,
+            "total_reserve_fuel": reserve_fuel,
+        }
+        amass_init = jet.initial_aircraft_mass(total_fuel_burn=fuel_estimate, **mass_kwargs)
 
         on_track = self.profile_ds is not None
 
@@ -2246,8 +2266,8 @@ class Optimizer:
                 )
 
             trip_fuel = amass_init - amass_final
-            new_amass_init = min(landing_mass + trip_fuel, self.atyp.amass_mtow)
-            if abs(new_amass_init - amass_init) < 100.0:  # 100 kg convergence threshold
+            new_amass_init = jet.initial_aircraft_mass(total_fuel_burn=trip_fuel, **mass_kwargs)
+            if abs(new_amass_init - amass_init) < MASS_CONVERGENCE_KG:
                 break
             amass_init = new_amass_init
 
@@ -2257,7 +2277,7 @@ class Optimizer:
             trip_fuel=trip_fuel,
             payload=payload,
             reserve_fuel=reserve_fuel,
-            landing_mass=landing_mass,
+            landing_mass=amass_final,
         )
         return self.result
 
