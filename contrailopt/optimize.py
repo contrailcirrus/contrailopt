@@ -970,9 +970,9 @@ def _relax_transitions(
     """Cruise a batch of transitions at every candidate Mach number, pick the best, and relax.
 
     Each transition carries a maneuver with known fuel and time (``fixed_fuel`` and ``fixed_time``:
-    a climb at its start over ``lead_dist``, or a final descent at its end over
-    ``trail_dist``) plus a level cruise over the rest, whose fuel and time depend on the
-    Mach number choice.
+    a step climb or step descent at its start over ``lead_dist``, or a final descent at its
+    end over ``trail_dist``) plus a level cruise over the rest, whose fuel and time depend on
+    the Mach number choice.
     """
     n = len(target_fi)
 
@@ -1243,9 +1243,9 @@ def solve_track(
     """Solve the vertical profile along a fixed track, choosing the flight level and Mach number.
 
     Unlike :func:`solve_dag`, there is no precomputed edge set. From a given state, each action
-    determines how far the aircraft advances: a level cruise (target FL equal to or below
-    the current one) moves one waypoint; a climb moves as far as the climb model's own
-    distance requires, then cruises the remainder of that segment to the next waypoint.
+    determines how far the aircraft advances: a level cruise (target FL equal to the current
+    one) moves one waypoint; a step climb or step descent moves as far as the maneuver model's
+    own distance requires, then cruises the remainder of that segment to the next waypoint.
     """
     fl_choices = fl_choices.astype(FLOAT_DTYPE, copy=False)
     mach_choices = mach_choices.astype(FLOAT_DTYPE, copy=False)
@@ -1334,11 +1334,12 @@ def solve_track(
         src_elapsed_active = state.best_time[h, active]
 
         # Every active source against every candidate target FL, flattened row-major
-        # (source varies slowest). Same-FL targets are the plain cruise action: the climb
+        # (source varies slowest). Same-FL targets are the plain cruise action: the maneuver
         # model returns zero distance/time/fuel for them, so they advance exactly one
-        # waypoint through the searchsorted below. Step-downs likewise cost nothing here
-        # and are always feasible, as in solve_dag; without them the aircraft could climb
-        # to a level it cannot sustain as fuel burns off and have no way back down.
+        # waypoint. Step-downs are always feasible in the sense that the aircraft can always
+        # give up altitude; without them it could climb to a level it cannot sustain as fuel
+        # burns off and have no way back down. They can still run out of track, which
+        # ``_step_change`` reports.
         src_fl_2d = np.repeat(src_fl_active, n_fl)
         tgt_fl_2d = np.tile(fl_choices, n_active)
         mass_2d = np.repeat(src_mass_active, n_fl)
@@ -1347,14 +1348,10 @@ def solve_track(
             pa, h, src_fl_2d, tgt_fl_2d, mass_2d, fl_choices, atyp
         )
 
-        # A step down is priced as level cruise at the target FL over the whole span.
-        step_down = tgt_fl_2d < src_fl_2d
-        lead_dist = np.where(step_down, 0.0, step_dist)
+        # A step change of either sign is a lead maneuver over ``step_dist``, then level
+        # cruise at the target FL for the rest of the segment.
         penalty = np.where(tgt_fl_2d != src_fl_2d, step_penalty_kg, 0.0).astype(FLOAT_DTYPE)
-        lead_fuel = np.where(step_down, 0.0, step_fuel) + penalty
-        lead_time = np.where(step_down, 0.0, step_time)
-        lead_mass = np.where(step_down, mass_2d, step_mass)
-        feasible = feasible | step_down | (tgt_fl_2d == src_fl_2d)
+        feasible |= tgt_fl_2d == src_fl_2d
 
         # Only the final descent below can finish the flight.
         feasible &= arrival != h_dest
@@ -1371,12 +1368,12 @@ def solve_track(
             src_fi=np.repeat(active, n_fl),
             src_cost=np.repeat(src_cost_active, n_fl),
             src_elapsed=np.repeat(src_elapsed_active, n_fl),
-            lead_dist=lead_dist,
+            lead_dist=step_dist,
             trail_dist=np.zeros(n_active * n_fl, dtype=FLOAT_DTYPE),
-            fixed_fuel=lead_fuel,
-            fixed_time=lead_time,
-            cruise_mass=lead_mass,
-            post_mass=lead_mass,
+            fixed_fuel=step_fuel + penalty,
+            fixed_time=step_time,
+            cruise_mass=step_mass,
+            post_mass=step_mass,
             feasible=feasible,
             atyp=atyp,
             cost_index=cost_index,
