@@ -10,6 +10,6 @@ repos:
           - --extra-keys=metadata.kernelspec metadata.language_info.version
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.5
+    rev: v0.16.6
     hooks:
       - id: ruff-check
