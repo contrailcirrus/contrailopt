@@ -588,44 +588,80 @@ class HorizontalDAG:
     def from_static_graph(
         cls,
         ds: xr.Dataset,
-        origin_lon: float,
-        origin_lat: float,
-        dest_lon: float,
-        dest_lat: float,
+        origin: AirportCoords,
+        dest: AirportCoords,
         max_angle_deg: float = 40.0,
         max_dist_m: float = 500_000.0,
         dtype: type[np.floating] = np.float64,
     ) -> Self:
         """Build a DAG from a static undirected graph."""
-        static_lon = ds["lon"].values
-        static_lat = ds["lat"].values
-        static_tail = ds["tail"].values
-        static_head = ds["head"].values
+        lon = ds["lon"].values
+        lat = ds["lat"].values
+        tail = ds["tail"].values
+        head = ds["head"].values
         n_nodes = ds.sizes["node"]
 
-        # origin and destination are second-to-last and last nodes
-        # avoids needing to update existing tail and head indexes
-        lon = np.concat([static_lon, [origin_lon, dest_lon]])
-        lat = np.concat([static_lat, [origin_lat, dest_lat]])
+        # short-circuit if both airports are already in graph
+        if origin.icao_code in ds["icao"] and dest.icao_code in ds["icao"]:
+            origin_idx = ds["airport_node"].sel(icao=origin.icao_code).compute().item()
+            dest_idx = ds["airport_node"].sel(icao=dest.icao_code).compute().item()
+            return cls.from_network(
+                lon=lon.astype(dtype),
+                lat=lat.astype(dtype),
+                tail=tail,
+                head=head,
+                origin_idx=origin_idx,
+                dest_idx=dest_idx,
+                max_angle_deg=max_angle_deg,
+                directed=False
+            )
 
-        # add departure and arrival routes as undirected edges
-        da_tail, da_head = _neighborhood_edges(
-            lon=static_lon,
-            lat=static_lat,
-            other_lon=np.array([origin_lon, dest_lon]),
-            other_lat=np.array([origin_lat, dest_lat]),
+        if origin.icao_code in ds["icao"]:  # only missing destination
+            dest_lon, dest_lat = dest.coords
+            other_lon = np.array([dest_lon])
+            other_lat = np.array([dest_lat])
+            origin_idx = ds["airport_node"].sel(icao=origin.icao_code).compute().item()
+            dest_idx = n_nodes
+
+        elif dest.icao_code in ds["icao"]:  # only missing origin
+            origin_lon, origin_lat = origin.coords
+            other_lon = np.array([origin_lon])
+            other_lat = np.array([origin_lat])
+            origin_idx = n_nodes
+            dest_idx = ds["airport_node"].sel(icao=dest.icao_code).compute().item()
+
+        else:  # missing origin and destination
+            origin_lon, origin_lat = origin.coords
+            dest_lon, dest_lat = dest.coords
+            other_lon = np.array([origin_lon, dest_lon])
+            other_lat = np.array([origin_lat, dest_lat])
+            origin_idx = n_nodes
+            dest_idx = n_nodes + 1
+
+        # add undirected edges to missing nodes
+        other_tail, other_head = _neighborhood_edges(
+            lon=lon,
+            lat=lat,
+            other_lon=other_lon,
+            other_lat=other_lat,
             max_dist_m=max_dist_m,
         )
-        tail = np.concat([static_tail, da_tail])
-        head = np.concat([static_head, da_head + n_nodes])
+
+        # missing nodes are appended to end
+        # avoids needing to update existing tail and head indexes
+        # head index of edges to missing nodes must be increased
+        lon = np.concat((lon, other_lon))
+        lat = np.concat((lat, other_lat))
+        tail = np.concat([tail, other_tail])
+        head = np.concat([head, other_head + n_nodes])
 
         return cls.from_network(
             lon=lon.astype(dtype),
             lat=lat.astype(dtype),
             tail=tail,
             head=head,
-            origin_idx=n_nodes,
-            dest_idx=n_nodes + 1,
+            origin_idx=origin_idx,
+            dest_idx=dest_idx,
             max_angle_deg=max_angle_deg,
             directed=False
         )
@@ -1336,10 +1372,10 @@ class EdgeMetLookup:
         # Reset edge index
         ds = ds.assign_coords(edge=np.arange(n_edges))
 
-        # Fill departure and arrival routes
+        # Fill missing edges
         # Use met, if provided, with specified sampling rate
         if met is not None:
-            fill = _fill_from_gridded_met(
+            _fill_from_gridded_met(  # no-op if no edges are missing
                 ds,
                 dag,
                 met,
@@ -1348,7 +1384,6 @@ class EdgeMetLookup:
                 flight_hours,
                 spacing_m
             )
-            ds = ds.fillna(fill)
 
             # Raise on NaN in core weather - downstream computations would be poisoned.
             variables = ["air_temperature", "headwind"]
@@ -1403,10 +1438,14 @@ def _fill_from_gridded_met(
     takeoff_time: pd.Timestamp,
     flight_hours: int,
     spacing_m: float,
-) -> xr.Dataset:
+) -> None:
     """Fill missing edges using gridded met data."""
-    # Construct subset of DAG with missing edges only
+    # Identify missing edges: null values across all variables, altitudes, and times
     missing = ds.isnull().all(["altitude_ft", "time"]).to_array().all("variable")
+    if not missing.any():
+        return
+
+    # Construct subset of DAG with missing edges only
     tail = dag.edge_src[missing]
     head = dag.adj[missing]
     edges = np.stack((tail, head))
@@ -1440,7 +1479,10 @@ def _fill_from_gridded_met(
     ).aggregate().ds
 
     # Update edge coordinate to match full DAG
-    return fill.assign_coords(missing[missing].coords)
+    fill = fill.assign_coords(missing[missing].coords)
+
+    # Fill DAG edges
+    ds.fillna(fill)
 
 
 def _neighborhood_edges(
