@@ -1659,8 +1659,8 @@ def _prepare_static_graph(
     """Return the solver's DAG and static met lookup based on a global graph."""
     dag = HorizontalDAG.from_static_graph(
         ds,
-        *origin.coords,
-        *dest.coords,
+        origin,
+        dest,
         dtype=FLOAT_DTYPE,
         **kwargs
     )
