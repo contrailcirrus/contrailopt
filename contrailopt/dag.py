@@ -595,66 +595,21 @@ class HorizontalDAG:
         dtype: type[np.floating] = np.float64,
     ) -> Self:
         """Build a DAG from a static undirected graph."""
+        if (icao:=origin.icao_code) not in ds["icao"]:
+            msg = f"Origin {icao} is not included in static graph."
+            raise ValueError(msg)
+
+        if (icao:=dest.icao_code) not in ds["icao"]:
+            msg = f"Destination {icao} is not included in static graph."
+            raise ValueError(msg)
+
         lon = ds["lon"].values
         lat = ds["lat"].values
         tail = ds["tail"].values
         head = ds["head"].values
-        n_nodes = ds.sizes["node"]
 
-        # short-circuit if both airports are already in graph
-        if origin.icao_code in ds["icao"] and dest.icao_code in ds["icao"]:
-            origin_idx = ds["airport_node"].sel(icao=origin.icao_code).compute().item()
-            dest_idx = ds["airport_node"].sel(icao=dest.icao_code).compute().item()
-            return cls.from_network(
-                lon=lon.astype(dtype),
-                lat=lat.astype(dtype),
-                tail=tail,
-                head=head,
-                origin_idx=origin_idx,
-                dest_idx=dest_idx,
-                max_angle_deg=max_angle_deg,
-                directed=False
-            )
-
-        if origin.icao_code in ds["icao"]:  # only missing destination
-            dest_lon, dest_lat = dest.coords
-            other_lon = np.array([dest_lon])
-            other_lat = np.array([dest_lat])
-            origin_idx = ds["airport_node"].sel(icao=origin.icao_code).compute().item()
-            dest_idx = n_nodes
-
-        elif dest.icao_code in ds["icao"]:  # only missing origin
-            origin_lon, origin_lat = origin.coords
-            other_lon = np.array([origin_lon])
-            other_lat = np.array([origin_lat])
-            origin_idx = n_nodes
-            dest_idx = ds["airport_node"].sel(icao=dest.icao_code).compute().item()
-
-        else:  # missing origin and destination
-            origin_lon, origin_lat = origin.coords
-            dest_lon, dest_lat = dest.coords
-            other_lon = np.array([origin_lon, dest_lon])
-            other_lat = np.array([origin_lat, dest_lat])
-            origin_idx = n_nodes
-            dest_idx = n_nodes + 1
-
-        # add undirected edges to missing nodes
-        other_tail, other_head = _neighborhood_edges(
-            lon=lon,
-            lat=lat,
-            other_lon=other_lon,
-            other_lat=other_lat,
-            max_dist_m=max_dist_m,
-        )
-
-        # missing nodes are appended to end
-        # avoids needing to update existing tail and head indexes
-        # head index of edges to missing nodes must be increased
-        lon = np.concat((lon, other_lon))
-        lat = np.concat((lat, other_lat))
-        tail = np.concat([tail, other_tail])
-        head = np.concat([head, other_head + n_nodes])
-
+        origin_idx = ds["airport_node"].sel(icao=origin.icao_code).compute().item()
+        dest_idx = ds["airport_node"].sel(icao=dest.icao_code).compute().item()
         return cls.from_network(
             lon=lon.astype(dtype),
             lat=lat.astype(dtype),
@@ -1299,7 +1254,6 @@ class EdgeMetLookup:
         altitude_ft: npt.NDArray[np.floating],
         takeoff_time: pd.Timestamp,
         flight_hours: int,
-        met: xr.Dataset | None = None,
         spacing_m: float = 25_000.0,
     ) -> Self:
         """Construct lookup from static graph."""
@@ -1372,52 +1326,11 @@ class EdgeMetLookup:
         # Reset edge index
         ds = ds.assign_coords(edge=np.arange(n_edges))
 
-        # Fill missing edges
-        # Use met, if provided, with specified sampling rate
-        if met is not None:
-            _fill_from_gridded_met(  # no-op if no edges are missing
-                ds,
-                dag,
-                met,
-                altitude_ft,
-                takeoff_time,
-                flight_hours,
-                spacing_m
-            )
-
-            # Raise on NaN in core weather - downstream computations would be poisoned.
-            variables = ["air_temperature", "headwind"]
-            for var in variables:
-                if ds[var].isnull().any():
-                    msg = (
-                        f"NaN values found in '{var}' "
-                        "after filling missing edges with gridded met data"
-                    )
-                    raise ValueError(msg)
-
-            # NaN-fill eef_per_m with 0.0 if not provided in gridded met.
-            # Otherwise, raise on NaN in eef_per_m.
-            if "eef_per_m" in ds:
-                if "eef_per_m" in met and ds["eef_per_m"].isnull().any():
-                    msg = (
-                        "NaN values found in 'eef_per_m' "
-                        "after filling missing edges with gridded met data"
-                    )
-                    raise ValueError(msg)
-                ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
-                variables.append("eef_per_m")
-
-            ds = ds[variables]
-
-        # Fill with ISA temperature, zero wind, zero EF otherwise
-        else:
-            altitude_m = units.ft_to_m(ds["altitude_ft"])
-            t_isa = units.m_to_T_isa(altitude_m).astype(ds["air_temperature"].dtype)
-            ds["air_temperature"] = ds["air_temperature"].fillna(t_isa)
-            ds["headwind"] = ds["headwind"].fillna(0.0)
-            if "eef_per_m" in ds:
-                ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
-
+        # Raise on NaN in any variables - downstream computations would be poisoned.
+        for var in variables:
+            if ds[var].isnull().any():
+                msg = f"NaN values found in '{var}' after constructing lookup from static graph."
+                raise ValueError(msg)
 
         return cls(
             ds=ds,
@@ -1428,61 +1341,6 @@ class EdgeMetLookup:
             cum_dist=cum_dist,
             delta_dist=delta_dist,
         )
-
-
-def _fill_from_gridded_met(
-    ds: xr.Dataset,
-    dag: HorizontalDAG,
-    met: xr.Dataset,
-    altitude_ft: npt.NDArray[np.floating],
-    takeoff_time: pd.Timestamp,
-    flight_hours: int,
-    spacing_m: float,
-) -> None:
-    """Fill missing edges using gridded met data."""
-    # Identify missing edges: null values across all variables, altitudes, and times
-    missing = ds.isnull().all(["altitude_ft", "time"]).to_array().all("variable")
-    if not missing.any():
-        return
-
-    # Construct subset of DAG with missing edges only
-    tail = dag.edge_src[missing]
-    head = dag.adj[missing]
-    edges = np.stack((tail, head))
-
-    inode, reindexed = np.unique(edges, return_inverse=True)
-    lon = dag.lon[inode]
-    lat = dag.lat[inode]
-    tail = reindexed[0,:]
-    head = reindexed[1,:]
-
-    subdag = HorizontalDAG.from_network(
-        lon=lon,
-        lat=lat,
-        tail=tail,
-        head=head,
-        origin_idx=0,           # unused
-        dest_idx=1,             # unused
-        max_angle_deg=np.inf,   # no filtering by orientation
-        directed=True
-    )
-
-    # Fill using aggregated met lookup on sub-DAG
-    fill = EdgeMetLookup.from_met(
-        met=met,
-        dag=subdag,
-        altitude_ft=altitude_ft,
-        takeoff_time=takeoff_time,
-        flight_hours=flight_hours,
-        spacing_m=spacing_m,
-        eef=None
-    ).aggregate().ds
-
-    # Update edge coordinate to match full DAG
-    fill = fill.assign_coords(missing[missing].coords)
-
-    # Fill DAG edges
-    ds.fillna(fill)
 
 
 def _neighborhood_edges(
