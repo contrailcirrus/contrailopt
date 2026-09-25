@@ -4,6 +4,7 @@ See :class:`Optimizer` for the main entrypoint.
 """
 
 import itertools
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
@@ -1725,7 +1726,6 @@ def _prepare_static_graph(
     origin: AirportCoords,
     dest: AirportCoords,
     ds: xr.Dataset,
-    met: xr.Dataset | None,
     avoidance_regions: list[list[tuple[float, float]]] | None,
     altitude_ft: npt.NDArray[np.floating],
     takeoff_time: pd.Timestamp,
@@ -1751,7 +1751,6 @@ def _prepare_static_graph(
         altitude_ft=altitude_ft,
         takeoff_time=takeoff_time,
         flight_hours=flight_hours,
-        met=met
     )
 
     return dag, met_lookup
@@ -1892,15 +1891,6 @@ class Optimizer:
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
 
-        if dollar_tonne_co2e:
-            if met is None:
-                raise ValueError("met must be provided when dollar_tonne_co2e is set")
-            if "eef_per_m" not in met and eef is None:
-                raise ValueError(
-                    "met must contain 'eef_per_m' or eef must be provided"
-                    " when dollar_tonne_co2e is set"
-                )
-
         self.fl_choices = (
             fl_choices if fl_choices is not None else cruise_flight_levels(origin_icao, dest_icao)
         )
@@ -1923,6 +1913,21 @@ class Optimizer:
 
         # Prepare DAG and meteorology from static graph if provided
         if static_graph is not None:
+            
+            if dollar_tonne_co2e and "eef_per_m" not in static_graph:
+                msg = "static_graph must contain eef_per_m when dollar_tonne_co2e is set"
+                raise ValueError(msg)
+
+            if met is not None:
+                msg = "met is not used when static_graph is provided."
+                warnings.warn(msg)
+            if eef is not None:
+                msg = "eef is not used when static_graph is provided."
+                warnings.warn(msg)
+            if dag is not None:
+                msg = "dag is not used when static_graph is provided."
+                warnings.warn(msg)
+
             flight_hours = flight_hours or estimate_flight_hours(
                 self.origin, self.dest, self.atyp.m_des
             )
@@ -1930,7 +1935,6 @@ class Optimizer:
                 self.origin,
                 self.dest,
                 static_graph,
-                met,
                 avoidance_regions=self.avoidance_regions,
                 altitude_ft=self.fl_choices,
                 takeoff_time=self.takeoff_time,
@@ -1942,6 +1946,15 @@ class Optimizer:
             return
 
         # Otherwise, fall back to dynamic graph generation
+        if dollar_tonne_co2e:
+            if met is None:
+                raise ValueError("met must be provided when dollar_tonne_co2e is set")
+            if "eef_per_m" not in met and eef is None:
+                raise ValueError(
+                    "met must contain 'eef_per_m' or eef must be provided"
+                    " when dollar_tonne_co2e is set"
+                )
+        
         self.dag = _prepare_dag(
             self.origin,
             self.dest,
