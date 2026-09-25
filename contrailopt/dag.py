@@ -11,7 +11,7 @@ import pandas as pd
 import xarray as xr
 from pycontrails import MetDataArray, MetDataset
 from pycontrails.core import airports
-from pycontrails.physics import geo, units
+from pycontrails.physics import geo
 
 from contrailopt.grid_utils import (
     bilinear_interp,
@@ -220,14 +220,6 @@ class HorizontalDAG:
         if len(pos) == 0:
             raise ValueError(f"No edge from {src} to {dst}")
         return start + pos.item()
-
-    def outgoing_edges(self, src: int) -> npt.NDArray[np.int64]:
-        """Return the indices of all edges leaving a node."""
-        return np.flatnonzero(self.edges[:, 0] == src)
-
-    def incoming_edges(self, dst: int) -> npt.NDArray[np.int64]:
-        """Return the indices of all edges ending at a node."""
-        return np.flatnonzero(self.edges[:, 1] == dst)
 
     def neighbors_batch(self, nodes: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
         """Return neighbors (duplicates included with multiplicity) for a batch of nodes."""
@@ -1347,17 +1339,11 @@ def _neighborhood_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
     max_dist_m: float = 500_000.0,
-    other_lon: npt.NDArray[np.floating] | None = None,
-    other_lat: npt.NDArray[np.floating] | None = None,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Build network of directed edges based on distance constraint.
 
     A pair of directed edges tail -> head is returned for each pair
     of nodes within ``max_dist_m`` of each other.
-
-    If ``other_lon`` and ``other_lat`` are provided, only returns
-    edges from points in ``lon`` and ``lat`` to points in ``other_lon``
-    and ``other_lat``.
 
     Returns
     -------
@@ -1366,15 +1352,11 @@ def _neighborhood_edges(
     head : npt.NDArray[np.int64]
         ``(m,)`` array of head indices
     """
-    if other_lon is None:
-        other_lon = lon
-    if other_lat is None:
-        other_lat = lat
     dist = geo.haversine(
         lon[:, np.newaxis],
         lat[:, np.newaxis],
-        other_lon[np.newaxis, :],
-        other_lat[np.newaxis, :],
+        lon[np.newaxis, :],
+        lat[np.newaxis, :],
     )
     return np.nonzero((dist > 0.0) & (dist <= max_dist_m))
 

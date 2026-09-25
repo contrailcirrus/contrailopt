@@ -25,7 +25,6 @@ from contrailopt.dag import (
     HorizontalDAG,
     Track,
     validate_flight_profile,
-    _neighborhood_edges,
 )
 from contrailopt.grid_utils import flight_profile_from_met
 
@@ -519,7 +518,6 @@ def _compute_edge_climbs(
     n_fl = len(fl_choices)
     edge_src_fi = fl_idxs[src_idx]
     edge_src_fl = fl_choices[edge_src_fi]
-    _neighborhood_edges,
     edge_src_mass = src_masses[src_idx]
 
     if met_lookup is not None:
@@ -1797,6 +1795,21 @@ class Optimizer:
         Aircraft type key in the PS model parameter table (e.g. ``"A320"``).
     takeoff_time : pd.Timestamp
         Departure time, used for met interpolation.
+    static_graph : xr.Dataset or None, default None
+        Static graph with "air_temperature", "headwind", and (optionally) "eef_per_m"
+        pre-interpolated onto edges. Takes precedence over "met", "eef", and "dag" if any
+        are provided.
+        Graph nodes are defined by "lon" and "lat" variables with coordinate "node".
+        Airports are defined by an "airport_node" variable with coordinate "icao" containing
+        airport ICAO codes and values that map to node coordinates.
+        Graph edges are defined by "tail" and "head" variables with coordinate "edge" and
+        values that map to coordinates of start and end nodes. Edges are treated as undirected, so
+        directed acyclic graphs generated from static graphs can include edges from "tail" nodes
+        to "head" nodes and from "head" nodes to "tail" nodes.
+        "air_temperature", "headwind", and "eef_per_m" are provided as variables with "edge",
+        "level", and "time" coordinates (dimension ("edge", "level", "time")). Headwind values
+        are for edges directed from "tail" nodes to "head" nodes. "level" and "time" coordinates
+        include pressure levels (hPa) and times, respectively.
     met : MetDataset or xr.Dataset or None, default None
         Gridded met data with ``air_temperature``, ``eastward_wind``, and ``northward_wind``.
         If *None*, cruise performance uses ISA temperatures and zero wind.
