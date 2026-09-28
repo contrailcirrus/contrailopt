@@ -750,11 +750,15 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     state.best_mass[flat_nbr[wi], wj] = arrival_mass[wi, wj]
     state.best_time[flat_nbr[wi], wj] = arrival_time[wi, wj]
     state.best_mach[flat_nbr[wi], wj] = best_mach[wi, wj]
-    state.best_eef[flat_nbr[wi], wj] = cruise_eef[wi, wj]
     state.best_climb_dist[flat_nbr[wi], wj] = climb_dist[wi, wj]
     state.best_climb_time[flat_nbr[wi], wj] = climb_time[wi, wj]
     state.best_prev_h[flat_nbr[wi], wj] = h_idxs[src_idx[wi]]
     state.best_prev_fi[flat_nbr[wi], wj] = fl_idxs[src_idx[wi]]
+    
+    if ctx.met_lookup is not None and ctx.met_lookup.has_eef_per_m:
+        state.best_eef[flat_nbr[wi], wj] = cruise_eef[wi, wj]
+    else:
+        state.best_eef[flat_nbr[wi], wj] = 0.0
 
 
 def solve_dag(

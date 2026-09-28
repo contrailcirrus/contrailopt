@@ -960,6 +960,11 @@ class EdgeMetLookup:
             return True
         return False
 
+    @property
+    def has_eef_per_m(self) -> bool:
+        """Return True if meteorology includes contrail energy forcing."""
+        return "eef_per_m" in self.ds.variables
+
     def __repr__(self) -> str:
         n_samples = len(self.edge_idx)
         n_edges = len(self.edge_ptr) - 1
