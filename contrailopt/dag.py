@@ -869,7 +869,7 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
     """Validate and format a ``(waypoint, altitude_ft)`` flight profile for the track solver.
 
     Returns a dataset carrying the met variables under their original names
-    (``air_temperature``, ``u_wind``, ``v_wind``, and optional ``eef_per_m``),
+    (``air_temperature``, ``tailwind``, and optional ``eef_per_m``),
     each cast to float32 and oriented ``(waypoint, altitude_ft)``.
 
     NaN in the core weather variables raises, while NaN in ``eef_per_m`` is zero-filled.
@@ -880,12 +880,12 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
 
     _warn_if_ef_present(ds)
 
-    for required in ("air_temperature", "u_wind", "v_wind"):
+    for required in ("air_temperature", "tailwind"):
         if required not in ds:
             raise ValueError(f"flight profile is missing required variable '{required}'")
 
     data_vars = {}
-    for name in ("air_temperature", "u_wind", "v_wind", "eef_per_m"):
+    for name in ("air_temperature", "tailwind", "eef_per_m"):
         if name not in ds:
             continue
 
@@ -908,7 +908,7 @@ class EdgeInterpolation:
     """Met fields interpolated at sample points."""
 
     air_temperature: npt.NDArray[np.floating]
-    headwind: npt.NDArray[np.floating]
+    tailwind: npt.NDArray[np.floating]
     eef_per_m: npt.NDArray[np.floating] | None
 
 
@@ -942,7 +942,7 @@ class EdgeMetLookup:
     delta_dist: npt.NDArray[np.floating]
 
     def __post_init__(self) -> None:
-        required = {"air_temperature", "headwind"}
+        required = {"air_temperature", "tailwind"}
         missing = required - set(self.ds)
         if missing:
             raise ValueError(f"Met dataset missing required variables: {missing}")
@@ -1026,7 +1026,7 @@ class EdgeMetLookup:
 
         return EdgeInterpolation(
             air_temperature=_lerp("air_temperature"),
-            headwind=_lerp("headwind"),
+            tailwind=_lerp("tailwind"),
             eef_per_m=_lerp("eef_per_m") if "eef_per_m" in self.ds else None,
         )
 
@@ -1183,12 +1183,12 @@ class EdgeMetLookup:
         # exactly designed for this, so just call custom numpy-based bilinear_interp
         ds = bilinear_interp(ds, sample_lon, sample_lat)
 
-        # Compute headwind component from vector winds
+        # Compute tailwind component from vector winds
         az = sample_azimuth[:, np.newaxis, np.newaxis]
-        ds["headwind"] = -(ds["eastward_wind"] * np.sin(az) + ds["northward_wind"] * np.cos(az))
+        ds["tailwind"] = ds["eastward_wind"] * np.sin(az) + ds["northward_wind"] * np.cos(az)
 
         # Raise on NaN in core weather - downstream computations would be poisoned.
-        variables = ["air_temperature", "headwind"]
+        variables = ["air_temperature", "tailwind"]
         for var in variables:
             if ds[var].isnull().any():
                 raise ValueError(
@@ -1301,7 +1301,7 @@ class EdgeMetLookup:
         delta_dist[last] = 0.0
 
         # Ensure variables
-        variables = ["air_temperature", "headwind"]
+        variables = ["air_temperature", "tailwind"]
         if "eef_per_m" in ds:
             variables.append("eef_per_m")
         ds = ds[variables]
@@ -1316,9 +1316,9 @@ class EdgeMetLookup:
         # Reindex edges to align with DAG and load into memory
         ds = ds.reindex(edge=edge_map).compute()
 
-        # Reverse headwind where needed
+        # Reverse tailwind where needed
         mask = ~rev_mask[:, np.newaxis, np.newaxis]
-        ds["headwind"] = ds["headwind"].where(mask, other=-ds["headwind"])
+        ds["tailwind"] = ds["tailwind"].where(mask, other=-ds["tailwind"])
 
         # Reset edge index
         ds = ds.assign_coords(edge=np.arange(n_edges))
