@@ -7,7 +7,7 @@ import numpy.typing as npt
 import pandas as pd
 import xarray as xr
 from pycontrails import MetDataArray, MetDataset
-from pycontrails.physics import units
+from pycontrails.physics import geo, units
 from scipy import ndimage
 
 
@@ -221,7 +221,7 @@ def flight_profile_from_met(
     Returns
     -------
     xr.Dataset
-        Dims ``(waypoint, altitude_ft)`` with ``air_temperature``, ``u_wind``, ``v_wind``,
+        Dims ``(waypoint, altitude_ft)`` with ``air_temperature``, ``tailwind``,
         and (when available) ``eef_per_m``; coords ``longitude``, ``latitude``, ``time``.
     """
 
@@ -243,7 +243,13 @@ def flight_profile_from_met(
     ds = bilinear_interp(ds, lon, lat)  # (sample, altitude_ft, time)
 
     profile = _select_waypoint_times(ds, time)
-    profile = profile.rename(eastward_wind="u_wind", northward_wind="v_wind")
+
+    az = np.empty_like(lon)
+    az[:-1] = np.deg2rad(geo.azimuth(lon[:-1], lat[:-1], lon[1:], lat[1:]))
+    az[-1] = az[-2]
+    az = az.reshape((-1,1))
+    profile["tailwind"] = profile["eastward_wind"] * np.sin(az) + profile["northward_wind"] * np.cos(az)
+    profile = profile.drop_vars(("eastward_wind", "northward_wind"))
 
     if eef is not None:
         # eef carries its own time and altitude_ft coords, which need not match met's, so
