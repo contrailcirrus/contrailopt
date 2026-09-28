@@ -25,6 +25,7 @@ from contrailopt.dag import (
     HorizontalDAG,
     Track,
     validate_flight_profile,
+    validate_static_graph,
 )
 from contrailopt.grid_utils import flight_profile_from_met
 
@@ -1837,7 +1838,7 @@ class Optimizer:
     met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
     aggregate_met : bool, default False
-        Aggregate meteorology to hold a single value per edge after sampling based on 
+        Aggregate meteorology to hold a single value per edge after sampling based on
         ``met_spacing_m``
     flight_hours : int or None, default None
         Upper-bound flight duration in hours for met time window. If None, estimated from
@@ -1921,7 +1922,9 @@ class Optimizer:
 
         # Prepare DAG and meteorology from static graph if provided
         if static_graph is not None:
-            
+
+            static_graph = validate_static_graph(static_graph)
+
             if dollar_tonne_co2e and "eef_per_m" not in static_graph:
                 msg = "static_graph must contain eef_per_m when dollar_tonne_co2e is set"
                 raise ValueError(msg)

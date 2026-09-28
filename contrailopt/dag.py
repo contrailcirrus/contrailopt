@@ -903,6 +903,50 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
     return xr.Dataset(data_vars, coords={"altitude_ft": ds["altitude_ft"].values})
 
 
+def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
+    """Validate a static graph for the 4D solver.
+
+    Returns a dataset carrying met variables under their original names
+    (``air_temperature``, ``tailwind``, and optional ``eef_per_m``)
+    with dimensions reordered to ``(edge, level, time)``.
+    """
+    expected: tuple[str,...] = ("node",)
+    for required in ("lon", "lat"):
+        if required not in ds:
+            raise ValueError(f"Static graph missing required variable '{required}'")
+        if ds[required].dims != expected:
+            raise ValueError(f"Variable '{required}' does not have expected dimensions {expected}")
+
+    expected = ("edge",)
+    for required in ("tail", "head"):
+        if required not in ds:
+            raise ValueError(f"Static graph missing required variable '{required}'")
+        if ds[required].dims != expected:
+            raise ValueError(f"Variable '{required}' does not have expected dimensions {expected}")
+
+    if "airport_node" not in ds:
+        raise ValueError("Static graph missing required variable 'airport_node'")
+    if ds["airport_node"].dims != ("icao",):
+        raise ValueError("Variable 'airport_node' does not have expected dimensions ('icao',)")
+    if not np.isin(ds["airport_node"], ds["node"]).all():
+        raise ValueError("Variable 'airport_node' contains some values not in coordinate 'node'")
+
+    expected = ("edge", "level", "time")
+    variables: tuple[str, ...] = ("air_temperature", "tailwind")
+    if "eef_per_m" in ds:
+        variables += ("eef_per_m",)
+    for required in variables:
+        if required not in ds:
+            raise ValueError(f"Static graph missing required variable '{required}'")
+        try:
+            ds[required] = ds[required].transpose(*expected).astype(np.float32)
+        except ValueError as e:
+            msg = f"Could not tranpose '{required}' to expected dimensions {expected}"
+            raise ValueError(msg) from e
+
+    return ds
+
+
 @dataclass(kw_only=True, slots=True, frozen=True)
 class EdgeInterpolation:
     """Met fields interpolated at sample points."""
