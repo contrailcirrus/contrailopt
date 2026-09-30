@@ -1317,7 +1317,11 @@ class EdgeMetLookup:
 
         # Match edges in dag to edge index in static graph
         _, fwd_map = fwd_index.reindex(dag_index)
+        if fwd_map is None:  # fwd_index.equals(dag_index)
+            fwd_map = np.arange(fwd_index.size)
         _, rev_map = rev_index.reindex(dag_index)
+        if rev_map is None:  # rev_index.equals(dag_index)
+            rev_map = np.arange(rev_index.size)
         edge_map = np.maximum(fwd_map, rev_map)
         rev_mask = (rev_map >= 0)
 
