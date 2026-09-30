@@ -41,9 +41,6 @@ _SEGMENT_DTYPE = np.dtype(
         ("latitude", FLOAT_DTYPE),
         ("altitude_ft", FLOAT_DTYPE),
         ("elapsed_s", FLOAT_DTYPE),
-        ("cost", FLOAT_DTYPE),
-        ("fuel", FLOAT_DTYPE),
-        ("eef", FLOAT_DTYPE),
     ]
 )
 
@@ -2461,13 +2458,11 @@ class Optimizer:
         skip_first: bool,
     ) -> npt.NDArray[_SEGMENT_DTYPE]:
         """Emit segments with cost data by resampling a single edge."""
-        state = self.result.state
         dag = self.dag
 
         edge_dist = geo.haversine(dag.lon[h_src], dag.lat[h_src], dag.lon[h_dst], dag.lat[h_dst])
         n_samp = np.maximum(np.ceil(edge_dist / resample_m).astype(int) + 1, 2)
         cum_dist = np.linspace(0.0, edge_dist, n_samp)
-        segment_frac = 1.0 / (n_samp - 1)
 
         if skip_first:
             cum_dist = cum_dist[1:]
@@ -2481,29 +2476,11 @@ class Optimizer:
             cum_dist
         )
 
-        # Apportion costs based on segment length
-        cost = state.best_cost  # cumulative
-        mass = state.best_mass
-        eef = state.best_eef
-        edge_cost = cost[h_dst, fi_dst] - cost[h_src, fi_src]
-        edge_fuel = mass[h_src, fi_src] - mass[h_dst, fi_dst]
-        edge_eef = eef[h_dst, fi_dst]
-        segment_cost = np.full(n_samp, edge_cost * segment_frac)
-        segment_fuel = np.full(n_samp, edge_fuel * segment_frac)
-        segment_eef = np.full(n_samp, edge_eef * segment_frac)
-        if not skip_first:
-            segment_cost[0] = np.nan
-            segment_fuel[0] = np.nan
-            segment_eef[0] = np.nan
-
         out = np.empty(n_samp, dtype=_SEGMENT_DTYPE)
         out["longitude"] = lon
         out["latitude"] = lat
         out["altitude_ft"] = alt
         out["elapsed_s"] = elapsed
-        out["cost"] = segment_cost
-        out["fuel"] = segment_fuel
-        out["eef"] = segment_eef
         return out
 
     def _track_waypoints(
@@ -2755,16 +2732,11 @@ class Optimizer:
 
         If ``resample_m`` is provided, the flight is resampled so that no waypoints
         are separated by more then ``resample_m``. No meteorology is attached to
-        resampled flights, but per-segment cost, fuel burn, and ef (if provided)
-        are attached with incoming-leg semantics.
+        resampled flights.
 
         The :meth:`solve()` method must be called first.
         """
         path_h, path_fl_idx, path_mach = self.reconstruct_path()
-        state = self.result.state
-        dag = self.dag
-        n_fl = len(self.fl_choices)
-        ground_fi = n_fl
 
         if resample_m is not None:
             resampled = [
@@ -2787,13 +2759,13 @@ class Optimizer:
                 latitude=segments["latitude"],
                 altitude_ft=segments["altitude_ft"],
                 time=time,
-                data={
-                    "cost": segments["cost"],
-                    "fuel": segments["fuel"],
-                    "eef": segments["eef"],
-                },
                 aircraft_type=self.aircraft_type
             )
+
+        state = self.result.state
+        dag = self.dag
+        n_fl = len(self.fl_choices)
+        ground_fi = n_fl
 
         if self.met_lookup is None and self.profile_ds is None:
             # No met at all: one waypoint per node, ISA-only solve.
