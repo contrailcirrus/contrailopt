@@ -446,7 +446,6 @@ class TestEdgeMetLookup:
         assert lookup.sample_lon.shape == lookup.sample_lat.shape
         assert lookup.cum_dist.shape == lookup.sample_lon.shape
         assert lookup.delta_dist.shape == lookup.sample_lon.shape
-        assert lookup.sample_azimuth.shape == lookup.sample_lon.shape
         assert "air_temperature" in lookup.ds.data_vars
 
         # All interpolated met values should be finite
@@ -509,7 +508,7 @@ class TestEdgeMetLookup:
             spacing_m=50_000.0,
         )
         # Manually construct with missing variable
-        bad_ds = lookup.ds.drop_vars("eastward_wind")
+        bad_ds = lookup.ds.drop_vars("tailwind")
         with pytest.raises(ValueError, match="missing required variables"):
             EdgeMetLookup(
                 ds=bad_ds,
@@ -519,7 +518,6 @@ class TestEdgeMetLookup:
                 sample_lat=lookup.sample_lat,
                 cum_dist=lookup.cum_dist,
                 delta_dist=lookup.delta_dist,
-                sample_azimuth=lookup.sample_azimuth,
             )
 
     def test_call_interpolation(self, diamond: HorizontalDAG, mock_met: MetDataset) -> None:
@@ -536,8 +534,7 @@ class TestEdgeMetLookup:
         times = np.full((3, 1), np.datetime64("2024-01-01T01:30", "ns"))
         result = lookup(idxs, times)
         assert result.air_temperature.shape == (3, 1)  # (n_sample, n_fl)
-        assert result.eastward_wind.shape == (3, 1)
-        assert result.northward_wind.shape == (3, 1)
+        assert result.tailwind.shape == (3, 1)
         assert np.all(np.isfinite(result.air_temperature))
 
     def test_call_at_exact_time(self, diamond: HorizontalDAG, mock_met: MetDataset) -> None:
@@ -571,8 +568,7 @@ class TestEdgeMetLookup:
         result = lookup(idxs, times)
         assert result.air_temperature.shape == (n_samples, n_fl)
         assert np.all(np.isfinite(result.air_temperature))
-        assert np.all(np.isfinite(result.eastward_wind))
-        assert np.all(np.isfinite(result.northward_wind))
+        assert np.all(np.isfinite(result.tailwind))
 
     def test_call_boundary_times(self, diamond: HorizontalDAG, mock_met: MetDataset) -> None:
         # Query at the first and last available met time steps
