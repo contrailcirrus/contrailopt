@@ -40,8 +40,7 @@ def track() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def profile(track: tuple[np.ndarray, np.ndarray, np.ndarray]) -> xr.Dataset:
     """Flight profile with ISA temperatures.
 
-    EEF confined to waypoints 15 - 19, and an along-track wind that is a tailwind over the
-    second half at the lower FLs.
+    EEF confined to waypoints 15 - 19, and a tailwind over the second half at the lower FLs.
     """
     lon, lat, time = track
     altitude_ft = np.arange(31000.0, 39001.0, 2000.0)
@@ -51,14 +50,13 @@ def profile(track: tuple[np.ndarray, np.ndarray, np.ndarray]) -> xr.Dataset:
     eef = np.zeros(shape, dtype=float)
     eef[15:20, :] = 5e9  # give every FL from the 15th to 19th waypoint high EF
 
-    u = np.zeros(shape, dtype=float)
-    u[20:, :2] = -50.0  # give lowest two FLs a strong tailwind
+    tailwind = np.zeros(shape, dtype=float)
+    tailwind[20:, :2] = 50.0  # give lowest two FLs a strong tailwind
 
     return xr.Dataset(
         {
             "air_temperature": (("waypoint", "altitude_ft"), np.broadcast_to(T_isa, shape).copy()),
-            "u_wind": (("waypoint", "altitude_ft"), u),
-            "v_wind": (("waypoint", "altitude_ft"), np.zeros(shape)),
+            "tailwind": (("waypoint", "altitude_ft"), tailwind),
             "eef_per_m": (("waypoint", "altitude_ft"), eef),
         },
         coords={
@@ -87,7 +85,7 @@ def flight(track: tuple[np.ndarray, np.ndarray, np.ndarray]) -> Flight:
 class TestProfileValidation:
     """Test ``validate_flight_profile``."""
 
-    @pytest.mark.parametrize("name", ["air_temperature", "u_wind", "v_wind"])
+    @pytest.mark.parametrize("name", ["air_temperature", "tailwind"])
     def test_nan_weather_raises(self, profile: xr.Dataset, name: str) -> None:
         """Confirm an error is raised if weather contains NaNs."""
         profile[name].values[3, 1] = np.nan
@@ -249,15 +247,14 @@ class TestStepDescentGeometry:
         time = np.datetime64("2025-02-01T12:00", "ns") + (elapsed * 1e9).astype("timedelta64[ns]")
         return lon, lat, time
 
-    def _solve(self, u: np.ndarray) -> Optimizer:
+    def _solve(self, tailwind: np.ndarray) -> Optimizer:
         lon, lat, time = self._track(self.N)
         shape = (self.N, len(self.ALT_FT))
         T_isa = units.m_to_T_isa(units.ft_to_m(self.ALT_FT))
         profile = xr.Dataset(
             {
                 "air_temperature": (("waypoint", "altitude_ft"), np.broadcast_to(T_isa, shape)),
-                "u_wind": (("waypoint", "altitude_ft"), u),
-                "v_wind": (("waypoint", "altitude_ft"), np.zeros(shape)),
+                "tailwind": (("waypoint", "altitude_ft"), tailwind),
             },
             coords={
                 "longitude": ("waypoint", lon),
@@ -282,10 +279,10 @@ class TestStepDescentGeometry:
     def stepping_down(self) -> Optimizer:
         """The tailwind moves from the top FLs to the bottom ones, forcing a mid-route step down."""
         shape = (self.N, len(self.ALT_FT))
-        u = np.zeros(shape, dtype=float)
-        u[: self.N // 2, 3:] = -50.0
-        u[self.N // 2 : self.N - 40, :2] = -50.0
-        return self._solve(u)
+        tailwind = np.zeros(shape, dtype=float)
+        tailwind[: self.N // 2, 3:] = 50.0
+        tailwind[self.N // 2 : self.N - 40, :2] = 50.0
+        return self._solve(tailwind)
 
     def test_step_down_covers_real_distance(self, stepping_down: Optimizer) -> None:
         """Confirm a step descent advances more than one waypoint beyond the current one."""
@@ -325,30 +322,25 @@ class TestStepChange:
     ALT_FT = np.arange(29000.0, 39001.0, 2000.0)
 
     @classmethod
-    def _profile_arrays(cls, u_wind: np.ndarray) -> _ProfileArrays:
-        """A due-east track of 10 km segments at ISA, with the given wind per waypoint.
-
-        Due east makes the along-track wind exactly ``u_wind``, so ground speed is TAS plus it.
-        """
-        n = len(u_wind)
+    def _profile_arrays(cls, tailwind: np.ndarray) -> _ProfileArrays:
+        """A due-east track of 10 km segments at ISA, with the given wind per waypoint."""
+        n = len(tailwind)
         shape = (n, len(cls.ALT_FT))
         seg = np.full(n - 1, 10_000.0, dtype=FLOAT_DTYPE)
         T_isa = units.m_to_T_isa(units.ft_to_m(cls.ALT_FT))
         return _ProfileArrays(
             air_temperature=np.broadcast_to(T_isa, shape).astype(FLOAT_DTYPE),
-            u_wind=np.broadcast_to(u_wind[:, np.newaxis], shape).astype(FLOAT_DTYPE),
-            v_wind=np.zeros(shape, dtype=FLOAT_DTYPE),
+            tailwind=np.broadcast_to(tailwind[:, np.newaxis], shape).astype(FLOAT_DTYPE),
             eef_per_m=None,
             cum_dist=np.r_[0.0, np.cumsum(seg)].astype(FLOAT_DTYPE),
             seg_dist=seg,
-            seg_azimuth=np.full(n - 1, np.pi / 2, dtype=FLOAT_DTYPE),
         )
 
     @classmethod
-    def _step(cls, u_wind: np.ndarray, src: float, tgt: float, mass: float = 60_000.0) -> tuple:
+    def _step(cls, tailwind: np.ndarray, src: float, tgt: float, mass: float = 60_000.0) -> tuple:
         atyp = ps_aircraft_params.load_aircraft_engine_params()["A320"]
         return _step_change(
-            cls._profile_arrays(np.asarray(u_wind, dtype=FLOAT_DTYPE)),
+            cls._profile_arrays(np.asarray(tailwind, dtype=FLOAT_DTYPE)),
             0,
             np.array([src], dtype=FLOAT_DTYPE),
             np.array([tgt], dtype=FLOAT_DTYPE),
@@ -492,8 +484,15 @@ class TestProfileFromMet:
         np.testing.assert_array_equal(prof["longitude"].values, lon)
         np.testing.assert_array_equal(prof["latitude"].values, lat)
         np.testing.assert_array_equal(prof["time"].values, time)
-        np.testing.assert_allclose(prof["u_wind"].values, self.U_WIND, rtol=1e-5)
-        np.testing.assert_allclose(prof["v_wind"].values, self.V_WIND, rtol=1e-5)
+
+        az =  np.deg2rad(geo.segment_azimuth(lon, lat))
+        az[-1] = az[-2]
+        az = np.tile(az.reshape(-1, 1), (1, prof.sizes["altitude_ft"]))
+        np.testing.assert_allclose(
+            prof["tailwind"].values,
+            self.U_WIND * np.sin(az) + self.V_WIND * np.cos(az),
+            rtol=1e-5
+        )
 
     @pytest.mark.parametrize("source", ["in_met", "separate_arg"])
     def test_eef_lands_in_profile(
