@@ -941,7 +941,7 @@ def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
         try:
             ds[required] = ds[required].transpose(*expected).astype(np.float32)
         except ValueError as e:
-            msg = f"Could not tranpose '{required}' to expected dimensions {expected}"
+            msg = f"Could not transpose '{required}' to expected dimensions {expected}"
             raise ValueError(msg) from e
 
     return ds
