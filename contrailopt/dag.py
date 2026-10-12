@@ -585,7 +585,7 @@ class HorizontalDAG:
         head: npt.NDArray[np.int64],
         origin_idx: int = 0,
         dest_idx: int = -1,
-        max_angle_deg: float = 40.0
+        max_angle_deg: float = 40.0,
     ) -> Self:
         """Build a DAG from a static network graph using the dual azimuth constraint."""
         edges, dists = _dual_az_edges(lon, lat, tail, head, origin_idx, dest_idx, max_angle_deg)
@@ -864,6 +864,7 @@ class EdgeInterpolation:
     eastward_wind: npt.NDArray[np.floating]
     northward_wind: npt.NDArray[np.floating]
     eef_per_m: npt.NDArray[np.floating] | None
+    hazard: npt.NDArray[np.floating] | None = None
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -966,6 +967,7 @@ class EdgeMetLookup:
             eastward_wind=_lerp("eastward_wind"),
             northward_wind=_lerp("northward_wind"),
             eef_per_m=_lerp("eef_per_m") if "eef_per_m" in self.ds else None,
+            hazard=_lerp("hazard") if "hazard" in self.ds else None,
         )
 
     @classmethod
@@ -978,6 +980,7 @@ class EdgeMetLookup:
         flight_hours: int,
         spacing_m: float,
         eef: xr.DataArray | MetDataArray | None = None,
+        hazard: xr.DataArray | MetDataArray | None = None,
     ) -> Self:
         """Interpolate met data onto ``dag`` edge sample points.
 
@@ -1007,6 +1010,11 @@ class EdgeMetLookup:
             weather grid, avoiding the need to pre-merge onto a common grid.
             Takes precedence over "eef_per_m" in ``met`` if both are present.
             Assumed to adhere to pycontrails :class:`MetDataArray` conventions.
+        hazard : xr.DataArray or MetDataArray or None, default None
+            Optional gridded hazard field (e.g. turbulence EDR) on its own lon/lat grid,
+            interpolated onto sample points the same way as ``eef``. NaN (no data) is
+            filled with 0.0, i.e. treated as hazard-free. Used by the optimizer's
+            ``hazard_max`` constraint and ``hazard_cost`` shadow cost.
 
         Returns
         -------
@@ -1110,6 +1118,14 @@ class EdgeMetLookup:
             # in some places), so we can't rely on xarray to automatically align
             ds["eef_per_m"] = (("sample", "altitude_ft", "time"), da_eef.values)
 
+        if hazard is not None:
+            ds["hazard"] = (
+                ("sample", "altitude_ft", "time"),
+                _interp_separate_field(
+                    hazard, "hazard", usable, sample_lon, sample_lat, altitude_ft
+                ),
+            )
+
         return cls(
             ds=ds,
             edge_ptr=edge_ptr,
@@ -1122,10 +1138,29 @@ class EdgeMetLookup:
         )
 
 
+def _interp_separate_field(
+    da: xr.DataArray | MetDataArray,
+    name: str,
+    usable: pd.DatetimeIndex,
+    sample_lon: npt.NDArray[np.floating],
+    sample_lat: npt.NDArray[np.floating],
+    altitude_ft: npt.NDArray[np.floating],
+) -> npt.NDArray[np.floating]:
+    """Interpolate a field given on its own grid onto ``(sample, altitude_ft, time)``.
+
+    Mirrors the separate-``eef`` path in ``EdgeMetLookup.from_met``; NaN is filled with 0.0.
+    """
+    if isinstance(da, MetDataArray):
+        ds = da.data.to_dataset(name=name).sel(time=usable)
+    else:
+        ds = MetDataset(da.to_dataset(name=name).sel(time=usable)).data
+    ds = localize_horizontally(ds, sample_lon, sample_lat)
+    ds = to_altitude_ft(ds, altitude_ft)
+    return bilinear_interp(ds, sample_lon, sample_lat)[name].fillna(0.0).values
+
+
 def _neighborhood_edges(
-    lon: npt.NDArray[np.floating],
-    lat: npt.NDArray[np.floating],
-    max_dist_m: float = 500_000.0
+    lon: npt.NDArray[np.floating], lat: npt.NDArray[np.floating], max_dist_m: float = 500_000.0
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Build network of directed edges based on distance constraint.
 
@@ -1155,7 +1190,7 @@ def _dual_az_edges(
     head: npt.NDArray[np.int64],
     origin_idx: int,
     dest_idx: int,
-    max_angle_deg: float = 40.0
+    max_angle_deg: float = 40.0,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
     """Filter directed edges using azimuth and progress constraints.
 

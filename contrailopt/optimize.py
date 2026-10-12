@@ -41,6 +41,7 @@ _WAYPOINT_DTYPE = np.dtype(
         ("elapsed_s", FLOAT_DTYPE),
         ("mach_number", FLOAT_DTYPE),
         ("eef_per_m", FLOAT_DTYPE),
+        ("hazard", FLOAT_DTYPE),
         ("air_temperature", FLOAT_DTYPE),
         ("eastward_wind", FLOAT_DTYPE),
         ("northward_wind", FLOAT_DTYPE),
@@ -58,6 +59,9 @@ _SECONDS_PER_YEAR = 60 * 60 * 24 * 365  # s yr-1
 _SURFACE_AREA_EARTH = 5.101e14  # m2
 _J_PER_KG_CO2 = _AGWP_CO2 * _SURFACE_AREA_EARTH * _SECONDS_PER_YEAR  # J kg-1
 J_PER_TONNE_CO2 = _J_PER_KG_CO2 * 1000.0  # J tonne-1
+
+#: Maps hazard values (e.g. turbulence EDR) to a shadow cost in kg fuel equivalent per meter.
+HazardCostFn = Callable[[npt.NDArray[np.floating]], npt.NDArray[np.floating]]
 
 
 def _expand_edge_samples(
@@ -139,6 +143,23 @@ def _cruise_zone_weights(
     return np.divide(overlap, seg_dist, out=np.zeros_like(overlap), where=seg_dist > 0.0)
 
 
+def _climbing_altitude_ft(
+    dist: npt.NDArray[FLOAT_DTYPE],
+    climb_dist: npt.NDArray[FLOAT_DTYPE],
+    src_alt_ft: npt.NDArray[FLOAT_DTYPE],
+    tgt_alt_ft: npt.NDArray[FLOAT_DTYPE],
+) -> npt.NDArray[FLOAT_DTYPE]:
+    """Aircraft altitude partway through a climb, assuming altitude increases linearly."""
+    climbed = np.divide(
+        dist,
+        climb_dist,
+        out=np.ones_like(climb_dist),
+        where=climb_dist > 0.0,
+    )
+    np.minimum(climbed, 1.0, out=climbed)  # hold the target level beyond the climb
+    return src_alt_ft + (tgt_alt_ft - src_alt_ft) * climbed
+
+
 def _climbing_fl_idxs(
     dist: npt.NDArray[FLOAT_DTYPE],
     climb_dist: npt.NDArray[FLOAT_DTYPE],
@@ -155,14 +176,7 @@ def _climbing_fl_idxs(
     npt.NDArray[np.int64]
         Index into ``fl_choices``, shaped like the broadcast of the other arguments.
     """
-    climbed = np.divide(
-        dist,
-        climb_dist,
-        out=np.ones_like(climb_dist),
-        where=climb_dist > 0.0,
-    )
-    np.minimum(climbed, 1.0, out=climbed)  # hold the target level beyond the climb
-    altitude_ft = src_alt_ft + (tgt_alt_ft - src_alt_ft) * climbed
+    altitude_ft = _climbing_altitude_ft(dist, climb_dist, src_alt_ft, tgt_alt_ft)
 
     upper = np.clip(np.searchsorted(fl_choices, altitude_ft), 1, len(fl_choices) - 1)
     lower = upper - 1
@@ -186,10 +200,13 @@ def _calculate_cruise_at_samples(
     descent_dd: npt.NDArray[FLOAT_DTYPE],
     flat_dist: npt.NDArray[FLOAT_DTYPE],
     src_alt_ft: npt.NDArray[FLOAT_DTYPE],
+    hazard_cost_fn: HazardCostFn | None = None,
 ) -> tuple[
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[np.bool_],
+    npt.NDArray[FLOAT_DTYPE],
+    npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
 ]:
     """Compute per-edge cruise fuel, time, feasibility, and EEF from met samples.
@@ -248,6 +265,13 @@ def _calculate_cruise_at_samples(
     cruise_eef : npt.NDArray[FLOAT_DTYPE]
         Shape ``(n_edge, n_fl)``. Integrated EEF in joules along the edge.
         Zero if ``eef_per_m`` is not in the met data.
+    cruise_hazard_max : npt.NDArray[FLOAT_DTYPE]
+        Shape ``(n_edge, n_fl)``. Largest ``hazard`` at any sample on the edge where the aircraft
+        is at or above the lowest candidate FL and not in the final descent. Zero if the met
+        lookup has no hazard field.
+    cruise_hazard_cost : npt.NDArray[FLOAT_DTYPE]
+        Shape ``(n_edge, n_fl)``. ``hazard_cost_fn(hazard)`` (kg fuel equivalent per meter)
+        integrated over the same samples. Zero if there is no hazard field or no cost function.
     """
     sample_idxs, sample_to_edge, edge_bounds = _expand_edge_samples(met_lookup, flat_edge_idx)
 
@@ -324,7 +348,42 @@ def _calculate_cruise_at_samples(
     else:
         cruise_eef = np.zeros((1, 1), dtype=FLOAT_DTYPE)
 
-    return cruise_fuel, cruise_time, cruise_feasible, cruise_eef
+    # Hazard (e.g. turbulence) at the level actually flown at each sample. Unlike EEF, it only
+    # counts at cruise levels: samples still climbing out of the airport sit below every
+    # candidate FL (their FL index is clipped to the lowest one), and the final descent leaves
+    # the cruise band, so neither should be constrained or charged by cruise-level hazard.
+    if sample_met.hazard is not None:
+        cum_dist = met_lookup.cum_dist[sample_idxs][:, np.newaxis]
+        src_alt = src_alt_ft[sample_to_edge][:, np.newaxis]
+        tgt_alt = fl_choices[np.newaxis, :]
+        sample_climb = climb_dist[sample_to_edge]
+        sample_fi = _climbing_fl_idxs(cum_dist, sample_climb, src_alt, tgt_alt, fl_choices)
+        altitude_ft = _climbing_altitude_ft(cum_dist, sample_climb, src_alt, tgt_alt)
+        before_descent = cum_dist <= (
+            flat_dist[sample_to_edge][:, np.newaxis] - descent_dd[sample_to_edge]
+        )
+        counted = (altitude_ft >= fl_choices[0] - 1.0) & before_descent
+
+        hazard = np.take_along_axis(sample_met.hazard, sample_fi, axis=1)
+        hazard = np.where(counted, hazard, 0.0).astype(FLOAT_DTYPE)
+        cruise_hazard_max = np.maximum.reduceat(hazard, edge_bounds, axis=0)
+        if hazard_cost_fn is not None:
+            seg_cost = np.where(counted, hazard_cost_fn(hazard), 0.0) * seg_dist[:, np.newaxis]
+            cruise_hazard_cost = np.add.reduceat(seg_cost.astype(FLOAT_DTYPE), edge_bounds, axis=0)
+        else:
+            cruise_hazard_cost = np.zeros((1, 1), dtype=FLOAT_DTYPE)
+    else:
+        cruise_hazard_max = np.zeros((1, 1), dtype=FLOAT_DTYPE)
+        cruise_hazard_cost = np.zeros((1, 1), dtype=FLOAT_DTYPE)
+
+    return (
+        cruise_fuel,
+        cruise_time,
+        cruise_feasible,
+        cruise_eef,
+        cruise_hazard_max,
+        cruise_hazard_cost,
+    )
 
 
 @dataclass(kw_only=True, slots=True, frozen=True)
@@ -386,6 +445,8 @@ class _SolverCtx:
     final_descent_fuel: npt.NDArray[FLOAT_DTYPE]
     final_descent_time: npt.NDArray[FLOAT_DTYPE]
     met_lookup: EdgeMetLookup | None
+    hazard_max: float | None = None  # edges whose cruise hazard exceeds this are infeasible
+    hazard_cost_fn: HazardCostFn | None = None  # kg fuel equivalent per meter of hazard exposure
 
 
 def _compute_ground_climbs(
@@ -654,7 +715,14 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     # Cruise fuel/time: (n_edge, n_fl, n_mach)
     cruise_dist = flat_dist[:, np.newaxis] - climb_dist - descent_dd
     if ctx.met_lookup is not None:
-        cruise_fuel, cruise_time, cruise_feasible, cruise_eef = _calculate_cruise_at_samples(
+        (
+            cruise_fuel,
+            cruise_time,
+            cruise_feasible,
+            cruise_eef,
+            cruise_hazard_max,
+            cruise_hazard_cost,
+        ) = _calculate_cruise_at_samples(
             ctx.met_lookup,
             flat_edge_idx,
             src_idx,
@@ -669,6 +737,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             descent_dd,
             flat_dist,
             src_alt_ft,
+            ctx.hazard_cost_fn,
         )
     else:
         cruise_fuel, cruise_time, cruise_feasible = _isa_cruise(
@@ -679,8 +748,13 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             cruise_dist,
         )
         cruise_eef = np.zeros((1, 1), dtype=FLOAT_DTYPE)
+        cruise_hazard_max = np.zeros((1, 1), dtype=FLOAT_DTYPE)
+        cruise_hazard_cost = np.zeros((1, 1), dtype=FLOAT_DTYPE)
 
     valid = feasible[:, :, np.newaxis] & cruise_feasible & (cruise_dist[:, :, np.newaxis] > 0.0)
+    if ctx.hazard_max is not None:
+        # Hard constraint: never fly an edge whose cruise-level hazard exceeds the threshold
+        valid &= (cruise_hazard_max <= ctx.hazard_max)[:, :, np.newaxis]
     cruise_cost = ctx.cost_index / 60.0 * cruise_time + cruise_fuel
     descent_cost = ctx.cost_index / 60.0 * descent_dt + descent_df
 
@@ -712,6 +786,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
         + cruise_cost
         + contrail_co2e_cost
         + fuel_co2_cost
+        + cruise_hazard_cost[:, :, np.newaxis]  # shadow cost; independent of the carbon price
     )
     total_cost = np.where(valid, total_cost, np.inf)
 
@@ -764,6 +839,8 @@ def solve_dag(
     allow_cooling_credit: bool,
     step_penalty_kg: float,
     on_wavefront: Callable[[npt.NDArray[np.int64], DAGState], None] | None = None,
+    hazard_max: float | None = None,
+    hazard_cost_fn: HazardCostFn | None = None,
 ) -> DAGState:
     """Solve shortest-path DP on the :class:`HorizontalDAG`, tracking mass exactly."""
     fl_choices = fl_choices.astype(FLOAT_DTYPE, copy=False)
@@ -787,6 +864,8 @@ def solve_dag(
         final_descent_fuel=fd_fuel,
         final_descent_time=fd_time,
         met_lookup=met_lookup,
+        hazard_max=hazard_max,
+        hazard_cost_fn=hazard_cost_fn,
     )
 
     n_h = dag.n_nodes  # number of horizontal nodes
@@ -1800,6 +1879,19 @@ class Optimizer:
     fl_choices : npt.NDArray[FLOAT_DTYPE] or None, default None
         Candidate cruise flight levels in feet. If *None*, the eastbound/westbound defaults
         from :func:`cruise_flight_levels` are used.
+    hazard : xr.DataArray or MetDataArray or None, default None
+        Optional gridded hazard field to avoid, e.g. turbulence EDR, with the same conventions
+        as ``eef``. It only affects the solution through ``hazard_max`` and ``hazard_cost_fn``,
+        and only at cruise levels (the climb out of the origin and the final descent are not
+        constrained). NaN is treated as hazard-free. Requires ``met``; not supported on a
+        :class:`Track`.
+    hazard_max : float or None, default None
+        Hard constraint: an edge is infeasible at a flight level if the hazard anywhere along it
+        exceeds this value. If no route satisfies it, :meth:`solve` raises ``ValueError``.
+    hazard_cost_fn : Callable or None, default None
+        Soft constraint: maps hazard values to a shadow cost in kg fuel equivalent per meter,
+        integrated along the route and added to the objective. Unlike the contrail term it does
+        not scale with ``dollar_tonne_co2e``.
     **kwargs
         Additional parameters for :class:`HorizontalDAG` generation if ``dag`` is None. Passed into
         :meth:`HorizontalDAG.from_poisson`.
@@ -1824,6 +1916,9 @@ class Optimizer:
         allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
         fl_choices: npt.NDArray[FLOAT_DTYPE] | None = None,
+        hazard: xr.DataArray | MetDataArray | None = None,
+        hazard_max: float | None = None,
+        hazard_cost_fn: HazardCostFn | None = None,
         **kwargs: Any,
     ) -> None:
         self.origin = (
@@ -1877,9 +1972,18 @@ class Optimizer:
                 flight_hours=flight_hours,
                 spacing_m=met_spacing_m,
                 eef=eef,
+                hazard=hazard,
             )
         else:
+            if hazard is not None:
+                raise ValueError("hazard requires met")
             self.met_lookup = None
+        if hazard is not None and isinstance(self.dag, Track):
+            raise NotImplementedError("hazard is not supported on a Track")
+        self.hazard_max = hazard_max
+        self.hazard_cost_fn = hazard_cost_fn
+        if (hazard_max is not None or hazard_cost_fn is not None) and hazard is None:
+            raise ValueError("hazard_max / hazard_cost_fn need a hazard field")
 
         # Set by from_flight: a validated (waypoint, altitude_ft) profile. When present,
         # solve() dispatches to solve_track instead of solve_dag.
@@ -2129,6 +2233,8 @@ class Optimizer:
         payload: float | None = None,
         allow_cooling_credit: bool | None = None,
         step_penalty_kg: float | None = None,
+        hazard_max: float | None = None,
+        hazard_cost_fn: HazardCostFn | None = None,
     ) -> DAGResult:
         """Solve the trajectory optimization via shortest-path dynamic programming on the DAG.
 
@@ -2181,6 +2287,13 @@ class Optimizer:
             self.allow_cooling_credit = allow_cooling_credit
         if step_penalty_kg is not None:
             self.step_penalty_kg = float(step_penalty_kg)
+        has_hazard = self.met_lookup is not None and "hazard" in self.met_lookup.ds
+        if (hazard_max is not None or hazard_cost_fn is not None) and not has_hazard:
+            raise ValueError("hazard_max / hazard_cost_fn need a hazard field at construction")
+        if hazard_max is not None:
+            self.hazard_max = float(hazard_max)
+        if hazard_cost_fn is not None:
+            self.hazard_cost_fn = hazard_cost_fn
         if aircraft_type is not None:
             self.aircraft_type = aircraft_type
             self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
@@ -2249,6 +2362,8 @@ class Optimizer:
                     met_lookup=self.met_lookup,
                     allow_cooling_credit=self.allow_cooling_credit,
                     step_penalty_kg=self.step_penalty_kg,
+                    hazard_max=self.hazard_max,
+                    hazard_cost_fn=self.hazard_cost_fn,
                 )
             ground_fi = len(self.fl_choices)
             amass_final = state.best_mass[self.dag.h_dest, ground_fi].item()
@@ -2258,6 +2373,12 @@ class Optimizer:
                         "No feasible path found along the track. The profile may be too "
                         "short for the initial climb and final descent to fit, or every "
                         "candidate flight level is infeasible at the required masses."
+                    )
+                if self.hazard_max is not None:
+                    raise ValueError(
+                        f"No feasible path found with hazard_max={self.hazard_max}. Either "
+                        "every route crosses the hazard limit, or DAG edges are too short for "
+                        "the initial climb or final descent (solve without hazard_max to tell)."
                     )
                 raise ValueError(
                     "No feasible path found. DAG edges may be too short for the "
@@ -2409,6 +2530,7 @@ class Optimizer:
         out["elapsed_s"] = elapsed
         out["mach_number"] = leg_mach
         out["eef_per_m"] = eef
+        out["hazard"] = 0.0  # hazard is not supported on a Track
         out["air_temperature"] = ds["air_temperature"].values[nodes, cruise_fi]
         out["eastward_wind"] = ds["u_wind"].values[nodes, cruise_fi]
         out["northward_wind"] = ds["v_wind"].values[nodes, cruise_fi]
@@ -2530,6 +2652,7 @@ class Optimizer:
         if is_last and np.any(in_descent):
             out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
         out["eef_per_m"] = eef_per_m
+        out["hazard"] = interp.hazard[:, 0] if interp.hazard is not None else 0.0
         out["air_temperature"] = interp.air_temperature[:, 0]
         out["eastward_wind"] = interp.eastward_wind[:, 0]
         out["northward_wind"] = interp.northward_wind[:, 0]
@@ -2624,6 +2747,8 @@ class Optimizer:
         }
         if has_eef:
             data["eef_per_m"] = wpts["eef_per_m"]
+        if self.met_lookup is not None and "hazard" in self.met_lookup.ds:
+            data["hazard"] = wpts["hazard"]
 
         # Splice the flown climb and descent back on
         if self.prepend_flown is not None:
@@ -2643,6 +2768,7 @@ class Optimizer:
                 ("u_wind", np.nan),
                 ("v_wind", np.nan),
                 ("eef_per_m", np.nan),
+                ("hazard", np.nan),
                 ("node_index", -1),
                 ("sample_index", -1),
             ):
@@ -2852,6 +2978,8 @@ class Optimizer:
             allow_cooling_credit=self.allow_cooling_credit,
             step_penalty_kg=self.step_penalty_kg,
             on_wavefront=capture,
+            hazard_max=self.hazard_max,
+            hazard_cost_fn=self.hazard_cost_fn,
         )
 
         # Cost range for colorbar (finite values from final snapshot)
