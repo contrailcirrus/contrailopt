@@ -87,16 +87,19 @@ def _solve(route, met, **kwargs) -> optimize.Optimizer:
 
 
 def _cruise_hazard(opt: optimize.Optimizer) -> np.ndarray:
-    fl = opt.to_flight()
-    at_cruise = fl.altitude_ft >= opt.fl_choices[0] - 1.0
-    return fl["hazard"][at_cruise]
+    """Reported hazard where it is constrained (to_flight leaves climb/descent as NaN)."""
+    h = opt.to_flight()["hazard"]
+    return h[np.isfinite(h)]
 
 
 def test_zero_hazard_matches_baseline(route, met) -> None:
     """An all-zero hazard field, a cap and a cost function change nothing."""
     base = _solve(route, met)
     with_zero = _solve(
-        route, met, hazard=_hazard(met, BLOB, value=0.0), hazard_max=0.5,
+        route,
+        met,
+        hazard=_hazard(met, BLOB, value=0.0),
+        hazard_max=0.5,
         hazard_cost_fn=lambda h: 1.0 * h,
     )
     for a, b in zip(base.reconstruct_path(), with_zero.reconstruct_path(), strict=True):
@@ -135,7 +138,12 @@ def test_infeasible_when_hazard_everywhere(route, met) -> None:
 def test_climb_out_of_origin_not_constrained(route, met) -> None:
     """Hazard over the departure airport doesn't block the climb below cruise levels."""
     origin, _ = route
-    box = (origin.longitude - 0.3, origin.longitude + 0.3, origin.latitude - 0.3, origin.latitude + 0.3)
+    box = (
+        origin.longitude - 0.3,
+        origin.longitude + 0.3,
+        origin.latitude - 0.3,
+        origin.latitude + 0.3,
+    )
     opt = _solve(route, met, hazard=_hazard(met, box), hazard_max=0.5)
     assert np.isfinite(opt.result.trip_fuel)
 
@@ -149,4 +157,6 @@ def test_to_flight_has_hazard_column(route, met) -> None:
     opt = _solve(route, met, hazard=_hazard(met, BLOB))
     fl = opt.to_flight()
     assert "hazard" in fl
-    assert np.all(np.isfinite(fl["hazard"]))
+    cruise = fl.altitude_ft >= opt.fl_choices[0] - 1.0
+    assert np.isfinite(fl["hazard"][cruise]).any()
+    assert np.isnan(fl["hazard"][fl.altitude_ft < opt.fl_choices[0] - 1.0]).all()  # climb/descent

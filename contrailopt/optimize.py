@@ -2652,7 +2652,13 @@ class Optimizer:
         if is_last and np.any(in_descent):
             out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
         out["eef_per_m"] = eef_per_m
-        out["hazard"] = interp.hazard[:, 0] if interp.hazard is not None else 0.0
+        if interp.hazard is not None:
+            # Report hazard only where it is constrained/charged: at cruise levels, outside the
+            # final descent (below the lowest candidate FL the cruise-level value doesn't apply)
+            not_counted = (alt < self.fl_choices[0] - 1.0) | in_descent
+            out["hazard"] = np.where(not_counted, np.nan, interp.hazard[:, 0])
+        else:
+            out["hazard"] = 0.0
         out["air_temperature"] = interp.air_temperature[:, 0]
         out["eastward_wind"] = interp.eastward_wind[:, 0]
         out["northward_wind"] = interp.northward_wind[:, 0]
