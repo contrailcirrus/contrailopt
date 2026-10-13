@@ -2653,10 +2653,17 @@ class Optimizer:
             out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
         out["eef_per_m"] = eef_per_m
         if interp.hazard is not None:
-            # Report hazard only where it is constrained/charged: at cruise levels, outside the
-            # final descent (below the lowest candidate FL the cruise-level value doesn't apply)
+            # Report hazard where and as it is constrained/charged: at the candidate FL nearest
+            # the aircraft (so mid step-climb, not the target FL), at cruise levels only, and
+            # outside the final descent (below the lowest candidate FL it doesn't apply).
+            n_fl = len(self.fl_choices)
+            all_fl = met_lookup(
+                sample_idxs, np.broadcast_to(times_dt[:, np.newaxis], (n_samp, n_fl))
+            )
+            nearest_fi = np.abs(alt[:, np.newaxis] - self.fl_choices[np.newaxis, :]).argmin(axis=1)
+            hazard = all_fl.hazard[np.arange(n_samp), nearest_fi]
             not_counted = (alt < self.fl_choices[0] - 1.0) | in_descent
-            out["hazard"] = np.where(not_counted, np.nan, interp.hazard[:, 0])
+            out["hazard"] = np.where(not_counted, np.nan, hazard)
         else:
             out["hazard"] = 0.0
         out["air_temperature"] = interp.air_temperature[:, 0]

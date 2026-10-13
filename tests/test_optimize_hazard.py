@@ -160,3 +160,33 @@ def test_to_flight_has_hazard_column(route, met) -> None:
     cruise = fl.altitude_ft >= opt.fl_choices[0] - 1.0
     assert np.isfinite(fl["hazard"][cruise]).any()
     assert np.isnan(fl["hazard"][fl.altitude_ft < opt.fl_choices[0] - 1.0]).all()  # climb/descent
+
+
+def test_reported_hazard_uses_nearest_fl_during_step_climb(route, met) -> None:
+    """Reported hazard is the nearest candidate FL's at each waypoint, as constrained.
+
+    The hazard increases with altitude, so mid step-climb the nearest FL and the climb's target
+    FL read different values; the report must follow the nearest one.
+    """
+    ds = met.data
+    shape = (ds.sizes["longitude"], ds.sizes["latitude"], ds.sizes["level"], ds.sizes["time"])
+    by_level = np.where(ds["level"].values < 300.0, 1.0, 0.0).astype(np.float32)  # upper level only
+    hazard = xr.DataArray(
+        np.broadcast_to(by_level[None, None, :, None], shape),
+        dims=["longitude", "latitude", "level", "time"],
+        coords={k: ds[k].values for k in ("longitude", "latitude", "level", "time")},
+    )
+    opt = _solve(route, met, hazard=hazard)
+    fl = opt.to_flight()
+    h = np.asarray(fl["hazard"])
+    ok = np.isfinite(h)
+    samples = np.asarray(fl["sample_index"])[ok]
+    times = np.asarray(fl["time"])[ok]
+    n_fl = len(opt.fl_choices)
+    every_fl = opt.met_lookup(samples, np.broadcast_to(times[:, None], (len(samples), n_fl))).hazard
+    nearest = np.abs(fl.altitude_ft[ok, None] - opt.fl_choices[None, :]).argmin(axis=1)
+    np.testing.assert_allclose(h[ok], every_fl[np.arange(len(samples)), nearest], rtol=1e-6)
+    # Non-vacuous: the route passes through more than one candidate FL (climb into cruise),
+    # and the field differs between them, so a target-FL report would not match
+    assert len(np.unique(nearest)) >= 2
+    assert np.ptp(every_fl[np.arange(len(samples)), nearest]) > 0
