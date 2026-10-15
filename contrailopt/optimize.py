@@ -4,6 +4,7 @@ See :class:`Optimizer` for the main entrypoint.
 """
 
 import itertools
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
@@ -24,6 +25,7 @@ from contrailopt.dag import (
     HorizontalDAG,
     Track,
     validate_flight_profile,
+    validate_static_graph,
 )
 from contrailopt.grid_utils import flight_profile_from_met
 
@@ -32,6 +34,15 @@ if TYPE_CHECKING:
     from matplotlib.animation import FuncAnimation
 
 FLOAT_DTYPE = np.float32
+
+_SEGMENT_DTYPE = np.dtype(
+    [
+        ("longitude", FLOAT_DTYPE),
+        ("latitude", FLOAT_DTYPE),
+        ("altitude_ft", FLOAT_DTYPE),
+        ("elapsed_s", FLOAT_DTYPE),
+    ]
+)
 
 _WAYPOINT_DTYPE = np.dtype(
     [
@@ -42,8 +53,7 @@ _WAYPOINT_DTYPE = np.dtype(
         ("mach_number", FLOAT_DTYPE),
         ("eef_per_m", FLOAT_DTYPE),
         ("air_temperature", FLOAT_DTYPE),
-        ("eastward_wind", FLOAT_DTYPE),
-        ("northward_wind", FLOAT_DTYPE),
+        ("tailwind", FLOAT_DTYPE),
         ("node_index", np.int64),
         ("sample_index", np.int64),
     ]
@@ -269,8 +279,7 @@ def _calculate_cruise_at_samples(
     mass_3d = post_climb_mass[sample_to_edge][:, :, np.newaxis]
 
     # Along-track wind component
-    az = met_lookup.sample_azimuth[sample_idxs][:, np.newaxis]
-    tailwind = sample_met.eastward_wind * np.sin(az) + sample_met.northward_wind * np.cos(az)
+    tailwind = sample_met.tailwind
 
     # Weight by cruise-zone overlap, then reduce to per-edge totals
     weight = _cruise_zone_weights(
@@ -335,6 +344,7 @@ class DAGState:
     best_mass: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival mass at each state
     best_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival time in seconds from takeoff
     best_mach: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) incoming cruise mach
+    best_eef : npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) cruise EEF on incoming edge
     best_climb_dist: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb distance on incoming edge
     best_climb_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb time on incoming edge
     best_prev_h: npt.NDArray[np.int64]  # (n_h, n_fl) previous horizontal node, -1 = no predecessor
@@ -348,6 +358,7 @@ class DAGState:
             best_mass=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_mach=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
+            best_eef=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_climb_dist=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_climb_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_prev_h=np.full((n_h, n_cols), -1, dtype=np.int64),
@@ -519,10 +530,7 @@ def _compute_edge_climbs(
         isa_T = units.m_to_T_isa(units.ft_to_m(edge_src_fl))
         delta_isa = (met_T - isa_T)[:, np.newaxis]
 
-        az = met_lookup.sample_azimuth[edge_start]
-        u = climb_met.eastward_wind[edge_arange, edge_src_fi]
-        v = climb_met.northward_wind[edge_arange, edge_src_fi]
-        tailwind = (u * np.sin(az) + v * np.cos(az))[:, np.newaxis]
+        tailwind = climb_met.tailwind
     else:
         delta_isa = 0.0
         tailwind = 0.0
@@ -608,10 +616,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             isa_T = units.m_to_T_isa(units.ft_to_m(base_alt))
             delta_isa = (met_T - isa_T)[:, np.newaxis]
 
-            az = ctx.met_lookup.sample_azimuth[edge_start]
-            u = climb_met.eastward_wind[:, 0]
-            v = climb_met.northward_wind[:, 0]
-            tailwind = (u * np.sin(az) + v * np.cos(az))[:, np.newaxis]
+            tailwind = climb_met.tailwind
         else:
             delta_isa = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
             tailwind = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
@@ -747,6 +752,11 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     state.best_climb_time[flat_nbr[wi], wj] = climb_time[wi, wj]
     state.best_prev_h[flat_nbr[wi], wj] = h_idxs[src_idx[wi]]
     state.best_prev_fi[flat_nbr[wi], wj] = fl_idxs[src_idx[wi]]
+    
+    if ctx.met_lookup is not None and ctx.met_lookup.has_eef_per_m:
+        state.best_eef[flat_nbr[wi], wj] = cruise_eef[wi, wj]
+    else:
+        state.best_eef[flat_nbr[wi], wj] = 0.0
 
 
 def solve_dag(
@@ -826,24 +836,20 @@ class _ProfileArrays:
     """Numpy arrays backing the track solver: met per (waypoint, FL) plus track geometry."""
 
     air_temperature: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
-    u_wind: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
-    v_wind: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
+    tailwind: npt.NDArray[FLOAT_DTYPE]  # (n_wp, n_fl)
     eef_per_m: npt.NDArray[FLOAT_DTYPE] | None  # (n_wp, n_fl)
     cum_dist: npt.NDArray[FLOAT_DTYPE]  # (n_wp,) along-track distance at each waypoint
     seg_dist: npt.NDArray[FLOAT_DTYPE]  # (n_wp - 1,) waypoint-to-waypoint distance
-    seg_azimuth: npt.NDArray[FLOAT_DTYPE]  # (n_wp - 1,) radians
 
     @classmethod
     def build(cls, dag: HorizontalDAG | Track, profile: xr.Dataset) -> Self:
         lon, lat = dag.lon, dag.lat
         return cls(
             air_temperature=profile["air_temperature"].values,
-            u_wind=profile["u_wind"].values,
-            v_wind=profile["v_wind"].values,
+            tailwind=profile["tailwind"].values,
             eef_per_m=profile["eef_per_m"].values if "eef_per_m" in profile else None,
             cum_dist=dag.cum_dist,
             seg_dist=dag.segment_dist,
-            seg_azimuth=np.deg2rad(geo.azimuth(lon[:-1], lat[:-1], lon[1:], lat[1:])),
         )
 
 
@@ -892,12 +898,9 @@ def _track_cruise(
     safe = np.minimum(node, len(pa.seg_dist) - 1)
     is_last = node == arrival[tr]
     delta = np.where(is_last, 0.0, pa.seg_dist[safe])
-    azimuth = pa.seg_azimuth[safe].copy()
-    prev = np.maximum(np.arange(len(node), dtype=np.int64) - 1, 0)
-    azimuth[is_last] = azimuth[prev][is_last]
 
     temperature = pa.air_temperature[node, fli]
-    tailwind = pa.u_wind[node, fli] * np.sin(azimuth) + pa.v_wind[node, fli] * np.cos(azimuth)
+    tailwind = pa.tailwind[node, fli]
 
     # Fraction of each sample's segment lying in the cruise zone
     span = pa.cum_dist[arrival] - pa.cum_dist[start]
@@ -1096,8 +1099,7 @@ def _step_change(
         # Weather at this waypoint, at the flight level nearest where the aircraft now is
         fi = np.argmin(np.abs(fl_choices[np.newaxis, :] - alt[:, np.newaxis]), axis=1)
         air_temperature = pa.air_temperature[j, fi]
-        az = pa.seg_azimuth[j].item()
-        tailwind = pa.u_wind[j, fi] * np.sin(az) + pa.v_wind[j, fi] * np.cos(az)
+        tailwind = pa.tailwind[j, fi]
 
         rocd = np.zeros_like(alt)
         tas = np.ones_like(alt)
@@ -1201,8 +1203,7 @@ def _determine_final_descent(
         # the altitude it is passing through there
         fi = np.argmin(np.abs(fl_choices - alt)).item()
         air_temperature = pa.air_temperature[j, fi : fi + 1]
-        az = pa.seg_azimuth[j].item()
-        tailwind = pa.u_wind[j, fi] * np.sin(az) + pa.v_wind[j, fi] * np.cos(az)
+        tailwind = pa.tailwind[j, fi]
 
         ff, rocd, tas = ps.descent_performance(
             np.array([alt], dtype=FLOAT_DTYPE), mass, air_temperature, atyp
@@ -1712,6 +1713,40 @@ def _prepare_dag(
     return dag
 
 
+def _prepare_static_graph(
+    origin: AirportCoords,
+    dest: AirportCoords,
+    ds: xr.Dataset,
+    avoidance_regions: list[list[tuple[float, float]]] | None,
+    altitude_ft: npt.NDArray[np.floating],
+    takeoff_time: pd.Timestamp,
+    flight_hours: int,
+    **kwargs
+) -> tuple[HorizontalDAG, EdgeMetLookup]:
+    """Return the solver's DAG and static met lookup based on a global graph."""
+    dag = HorizontalDAG.from_static_graph(
+        ds,
+        origin,
+        dest,
+        dtype=FLOAT_DTYPE,
+        **kwargs
+    )
+
+    if avoidance_regions:
+        dag = dag.exclude_polygons(avoidance_regions)
+    dag = dag.prune_unreachable()
+
+    met_lookup = EdgeMetLookup.from_static_graph(
+        ds=ds,
+        dag=dag,
+        altitude_ft=altitude_ft,
+        takeoff_time=takeoff_time,
+        flight_hours=flight_hours,
+    )
+
+    return dag, met_lookup
+
+
 def _check_airport_agreement(
     dag: HorizontalDAG, origin: AirportCoords, dest: AirportCoords
 ) -> None:
@@ -1753,6 +1788,21 @@ class Optimizer:
         Aircraft type key in the PS model parameter table (e.g. ``"A320"``).
     takeoff_time : pd.Timestamp
         Departure time, used for met interpolation.
+    static_graph : xr.Dataset or None, default None
+        Static graph with "air_temperature", "tailwind", and (optionally) "eef_per_m"
+        pre-interpolated onto edges. Takes precedence over "met", "eef", and "dag" if any
+        are provided.
+        Graph nodes are defined by "lon" and "lat" variables with coordinate "node".
+        Airports are defined by an "airport_node" variable with coordinate "icao" containing
+        airport ICAO codes and values that map to node coordinates.
+        Graph edges are defined by "tail" and "head" variables with coordinate "edge" and
+        values that map to coordinates of start and end nodes. Edges are treated as undirected, so
+        directed acyclic graphs generated from static graphs can include edges from "tail" nodes
+        to "head" nodes and from "head" nodes to "tail" nodes.
+        "air_temperature", "tailwind", and "eef_per_m" are provided as variables with "edge",
+        "level", and "time" coordinates (dimension ("edge", "level", "time")). Tailwind values
+        are for edges directed from "tail" nodes to "head" nodes. "level" and "time" coordinates
+        include pressure levels (hPa) and times, respectively.
     met : MetDataset or xr.Dataset or None, default None
         Gridded met data with ``air_temperature``, ``eastward_wind``, and ``northward_wind``.
         If *None*, cruise performance uses ISA temperatures and zero wind.
@@ -1784,6 +1834,9 @@ class Optimizer:
         burn stays physical.
     met_spacing_m : float, default 25_000.0
         Spacing in meters between met sample points along each edge.
+    aggregate_met : bool, default False
+        Aggregate meteorology to hold a single value per edge after sampling based on
+        ``met_spacing_m``
     flight_hours : int or None, default None
         Upper-bound flight duration in hours for met time window. If None, estimated from
         the aircraft type. Providing an explicit value decouples the met lookup from the
@@ -1812,6 +1865,7 @@ class Optimizer:
         aircraft_type: str,
         takeoff_time: pd.Timestamp,
         *,
+        static_graph: xr.Dataset | None = None,
         met: MetDataset | xr.Dataset | None = None,
         eef: xr.DataArray | MetDataArray | None = None,
         dag: HorizontalDAG | Track | None = None,
@@ -1820,6 +1874,7 @@ class Optimizer:
         dollar_kg_fuel: float = 1.0,
         step_penalty_kg: float = 0.0,
         met_spacing_m: float = 25_000.0,
+        aggregate_met: bool = False,
         flight_hours: int | None = None,
         allow_cooling_credit: bool = False,
         avoidance_regions: list[list[tuple[float, float]]] | None = None,
@@ -1842,44 +1897,11 @@ class Optimizer:
         self.aircraft_type = aircraft_type
         self.atyp = ps_aircraft_params.load_aircraft_engine_params()[aircraft_type]
 
-        if dollar_tonne_co2e:
-            if met is None:
-                raise ValueError("met must be provided when dollar_tonne_co2e is set")
-            if "eef_per_m" not in met and eef is None:
-                raise ValueError(
-                    "met must contain 'eef_per_m' or eef must be provided"
-                    " when dollar_tonne_co2e is set"
-                )
-
-        self.dag = _prepare_dag(
-            self.origin,
-            self.dest,
-            dag,
-            avoidance_regions,
-            **kwargs,
-        )
-        self.avoidance_regions = avoidance_regions
-
         self.fl_choices = (
             fl_choices if fl_choices is not None else cruise_flight_levels(origin_icao, dest_icao)
         )
         self.mach_choices = _mach_choices(self.atyp)
-
-        if met is not None:
-            flight_hours = flight_hours or estimate_flight_hours(
-                self.origin, self.dest, self.atyp.m_des
-            )
-            self.met_lookup = EdgeMetLookup.from_met(
-                met=met,
-                dag=self.dag,
-                altitude_ft=self.fl_choices,
-                takeoff_time=self.takeoff_time,
-                flight_hours=flight_hours,
-                spacing_m=met_spacing_m,
-                eef=eef,
-            )
-        else:
-            self.met_lookup = None
+        self.avoidance_regions = avoidance_regions
 
         # Set by from_flight: a validated (waypoint, altitude_ft) profile. When present,
         # solve() dispatches to solve_track instead of solve_dag.
@@ -1894,6 +1916,81 @@ class Optimizer:
         self.append_flown: dict[str, npt.NDArray] | None = None
 
         self.result: DAGResult | None = None
+
+        # Prepare DAG and meteorology from static graph if provided
+        if static_graph is not None:
+
+            static_graph = validate_static_graph(static_graph)
+
+            if dollar_tonne_co2e and "eef_per_m" not in static_graph:
+                msg = "static_graph must contain eef_per_m when dollar_tonne_co2e is set"
+                raise ValueError(msg)
+
+            if met is not None:
+                msg = "met is not used when static_graph is provided."
+                warnings.warn(msg)
+            if eef is not None:
+                msg = "eef is not used when static_graph is provided."
+                warnings.warn(msg)
+            if dag is not None:
+                msg = "dag is not used when static_graph is provided."
+                warnings.warn(msg)
+
+            flight_hours = flight_hours or estimate_flight_hours(
+                self.origin, self.dest, self.atyp.m_des
+            )
+            dag, met_lookup = _prepare_static_graph(
+                self.origin,
+                self.dest,
+                static_graph,
+                avoidance_regions=self.avoidance_regions,
+                altitude_ft=self.fl_choices,
+                takeoff_time=self.takeoff_time,
+                flight_hours=flight_hours,
+                **kwargs
+            )
+            self.dag = dag
+            self.met_lookup = met_lookup
+            return
+
+        # Otherwise, fall back to dynamic graph generation
+        if dollar_tonne_co2e:
+            if met is None:
+                raise ValueError("met must be provided when dollar_tonne_co2e is set")
+            if "eef_per_m" not in met and eef is None:
+                raise ValueError(
+                    "met must contain 'eef_per_m' or eef must be provided"
+                    " when dollar_tonne_co2e is set"
+                )
+        
+        self.dag = _prepare_dag(
+            self.origin,
+            self.dest,
+            dag,
+            self.avoidance_regions,
+            **kwargs,
+        )
+
+        if met is not None:
+            flight_hours = flight_hours or estimate_flight_hours(
+                self.origin, self.dest, self.atyp.m_des
+            )
+            met_lookup = EdgeMetLookup.from_met(
+                met=met,
+                dag=self.dag,
+                altitude_ft=self.fl_choices,
+                takeoff_time=self.takeoff_time,
+                flight_hours=flight_hours,
+                spacing_m=met_spacing_m,
+                eef=eef,
+            )
+            if aggregate_met:
+                met_lookup = met_lookup.aggregate()
+            self.met_lookup = met_lookup
+        else:
+            self.met_lookup = None
+
+
 
     @classmethod
     def from_flight(
@@ -1922,7 +2019,7 @@ class Optimizer:
         - ``met``: raw gridded 4D met, used to interpolate the flight's waypoints at each
           candidate flight level.
         - ``fl_profile``: an already-interpolated ``(waypoint, altitude_ft)`` dataset carrying
-          ``air_temperature``, ``u_wind``, ``v_wind``, and optionally ``eef_per_m``, aligned
+          ``air_temperature``, tailwind``, and optionally ``eef_per_m``, aligned
           waypoint-for-waypoint with ``flight``.
 
         Parameters
@@ -2350,6 +2447,42 @@ class Optimizer:
 
         return np.array(path_h), np.array(path_fl_idx), np.array(path_mach)
 
+    def _resampled_segments(
+        self,
+        h_src: int,
+        h_dst: int,
+        fi_src: int,
+        fi_dst: int,
+        leg_mach: float,
+        resample_m: float,
+        skip_first: bool,
+    ) -> npt.NDArray[_SEGMENT_DTYPE]:
+        """Emit segments with cost data by resampling a single edge."""
+        dag = self.dag
+
+        edge_dist = geo.haversine(dag.lon[h_src], dag.lat[h_src], dag.lon[h_dst], dag.lat[h_dst])
+        n_samp = np.maximum(np.ceil(edge_dist / resample_m).astype(int) + 1, 2)
+        cum_dist = np.linspace(0.0, edge_dist, n_samp)
+
+        if skip_first:
+            cum_dist = cum_dist[1:]
+            n_samp -= 1
+
+        lon, lat, alt, elapsed, _, _, _, _ = self._resample_edge(
+            h_src,
+            h_dst,
+            fi_src,
+            fi_dst,
+            cum_dist
+        )
+
+        out = np.empty(n_samp, dtype=_SEGMENT_DTYPE)
+        out["longitude"] = lon
+        out["latitude"] = lat
+        out["altitude_ft"] = alt
+        out["elapsed_s"] = elapsed
+        return out
+
     def _track_waypoints(
         self,
         h_src: int,
@@ -2410,8 +2543,7 @@ class Optimizer:
         out["mach_number"] = leg_mach
         out["eef_per_m"] = eef
         out["air_temperature"] = ds["air_temperature"].values[nodes, cruise_fi]
-        out["eastward_wind"] = ds["u_wind"].values[nodes, cruise_fi]
-        out["northward_wind"] = ds["v_wind"].values[nodes, cruise_fi]
+        out["tailwind"] = ds["tailwind"].values[nodes, cruise_fi]
         out["node_index"] = nodes
         out["sample_index"] = nodes
         return out
@@ -2430,16 +2562,10 @@ class Optimizer:
         Returns a structured array with dtype ``_WAYPOINT_DTYPE``.
         """
         met_lookup = self.met_lookup
-        state = self.result.state
         dag = self.dag
-        n_fl = len(self.fl_choices)
-        ground_fi = n_fl
-
-        t_src = state.best_time[h_src, fi_src]
-        t_dst = state.best_time[h_dst, fi_dst]
 
         edge_idx = dag.edge_index(h_src, h_dst)
-        edge_dist = dag.edge_dist[edge_idx]
+        cruise_fi = fi_dst
 
         # Sample range (skip source on subsequent edges to avoid duplication)
         s0 = met_lookup.edge_ptr[edge_idx]
@@ -2450,7 +2576,77 @@ class Optimizer:
         n_samp = len(sample_idxs)
         cum_dist = met_lookup.cum_dist[sample_idxs]
 
-        is_first = fi_src == ground_fi
+        # Resample trajectory
+        lon, lat, alt, elapsed, is_first, is_last, in_climb, in_descent = self._resample_edge(
+            h_src,
+            h_dst,
+            fi_src,
+            fi_dst,
+            cum_dist
+        )
+
+        # Interpolate met
+        times_dt = np.datetime64(self.takeoff_time) + (elapsed * 1e9).astype("timedelta64[ns]")
+        fl_arr = np.array([cruise_fi])
+        interp = met_lookup(sample_idxs, times_dt[:, np.newaxis], fl_idx=fl_arr)
+
+        eef_per_m = (
+            interp.eef_per_m[:, 0]
+            if interp.eef_per_m is not None
+            else np.zeros(n_samp, dtype=FLOAT_DTYPE)
+        )
+
+        out = np.empty(n_samp, dtype=_WAYPOINT_DTYPE)
+        out["longitude"] = lon
+        out["latitude"] = lat
+        out["altitude_ft"] = alt
+        out["elapsed_s"] = elapsed
+        out["mach_number"] = edge_mach
+        if is_first and np.any(in_climb):
+            out["mach_number"][in_climb] = ps.mach_schedule(alt[in_climb], self.atyp)
+        elif not is_first and np.any(in_climb):
+            out["mach_number"][in_climb] = self.atyp.m_des
+        if is_last and np.any(in_descent):
+            out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
+        out["eef_per_m"] = eef_per_m
+        out["air_temperature"] = interp.air_temperature[:, 0]
+        out["tailwind"] = interp.tailwind[:, 0]
+        out["node_index"] = -1
+        if not skip_first:
+            out["node_index"][0] = h_src
+        out["node_index"][-1] = h_dst
+        out["sample_index"] = sample_idxs
+        return out
+
+    def _resample_edge(
+        self,
+        h_src: int,
+        h_dst: int,
+        fi_src: int,
+        fi_dst: int,
+        cum_dist: npt.NDArray[np.floating]
+    ) -> tuple[
+        npt.NDArray[FLOAT_DTYPE],
+        npt.NDArray[FLOAT_DTYPE],
+        npt.NDArray[FLOAT_DTYPE],
+        npt.NDArray[FLOAT_DTYPE],
+        bool,
+        bool,
+        npt.NDArray[np.bool],
+        npt.NDArray[np.bool]
+    ]:
+        """Resample trajectory at specified cumulative distances along an edge."""
+        state = self.result.state
+        dag = self.dag
+
+        edge_idx = dag.edge_index(h_src, h_dst)
+        edge_dist = dag.edge_dist[edge_idx]
+        n_samp = cum_dist.size
+
+        t_src = state.best_time[h_src, fi_src]
+        t_dst = state.best_time[h_dst, fi_dst]
+
+        is_first = fi_src == len(self.fl_choices)
         is_last = h_dst == self.dag.h_dest
         cruise_fi = fi_dst
         cruise_fl = self.fl_choices[cruise_fi]
@@ -2506,41 +2702,27 @@ class Optimizer:
             dfrac = (cum_dist[in_descent] - descent_start) / descent_dist
             elapsed[in_descent] = t_src + climb_time_s + cruise_time + descent_time * dfrac
 
-        # --- Met interpolation ---
-        times_dt = np.datetime64(self.takeoff_time) + (elapsed * 1e9).astype("timedelta64[ns]")
-        fl_arr = np.array([cruise_fi])
-        interp = met_lookup(sample_idxs, times_dt[:, np.newaxis], fl_idx=fl_arr)
-
-        eef_per_m = (
-            interp.eef_per_m[:, 0]
-            if interp.eef_per_m is not None
-            else np.zeros(n_samp, dtype=FLOAT_DTYPE)
+        # --- Horizontal trajectory ---
+        lon, lat = slerp.gc_interp(
+            dag.lon[h_src],
+            dag.lat[h_src],
+            dag.lon[h_dst],
+            dag.lat[h_dst],
+            cum_dist / edge_dist
         )
 
-        out = np.empty(n_samp, dtype=_WAYPOINT_DTYPE)
-        out["longitude"] = met_lookup.sample_lon[sample_idxs]
-        out["latitude"] = met_lookup.sample_lat[sample_idxs]
-        out["altitude_ft"] = alt
-        out["elapsed_s"] = elapsed
-        out["mach_number"] = edge_mach
-        if is_first and np.any(in_climb):
-            out["mach_number"][in_climb] = ps.mach_schedule(alt[in_climb], self.atyp)
-        elif not is_first and np.any(in_climb):
-            out["mach_number"][in_climb] = self.atyp.m_des
-        if is_last and np.any(in_descent):
-            out["mach_number"][in_descent] = ps.mach_schedule(alt[in_descent], self.atyp)
-        out["eef_per_m"] = eef_per_m
-        out["air_temperature"] = interp.air_temperature[:, 0]
-        out["eastward_wind"] = interp.eastward_wind[:, 0]
-        out["northward_wind"] = interp.northward_wind[:, 0]
-        out["node_index"] = -1
-        if not skip_first:
-            out["node_index"][0] = h_src
-        out["node_index"][-1] = h_dst
-        out["sample_index"] = sample_idxs
-        return out
+        return (
+            lon.astype(FLOAT_DTYPE),
+            lat.astype(FLOAT_DTYPE),
+            alt,
+            elapsed,
+            is_first,
+            is_last,
+            in_climb,
+            in_descent,
+        )
 
-    def to_flight(self) -> Flight:
+    def to_flight(self, resample_m: float | None = None) -> Flight:
         """Return the optimal trajectory as a :class:`pycontrails.Flight`.
 
         When met data is available, waypoints are emitted at each edge sample
@@ -2548,9 +2730,38 @@ class Optimizer:
         per-sample ``eef_per_m``. Without met, falls back to one waypoint per
         DAG node.
 
-        The :meth:`solve` method must be called first.
+        If ``resample_m`` is provided, the flight is resampled so that no waypoints
+        are separated by more then ``resample_m``. No meteorology is attached to
+        resampled flights.
+
+        The :meth:`solve()` method must be called first.
         """
         path_h, path_fl_idx, path_mach = self.reconstruct_path()
+
+        if resample_m is not None:
+            resampled = [
+                self._resampled_segments(
+                    path_h[k],
+                    path_h[k + 1],
+                    path_fl_idx[k],
+                    path_fl_idx[k + 1],
+                    path_mach[k + 1],
+                    resample_m,
+                    skip_first=(k > 0)
+                )
+                for k in range(len(path_h) - 1)
+            ]
+            segments = np.concat(resampled)
+
+            time = self.takeoff_time + pd.to_timedelta(segments["elapsed_s"], unit="s")
+            return Flight(
+                longitude=segments["longitude"],
+                latitude=segments["latitude"],
+                altitude_ft=segments["altitude_ft"],
+                time=time,
+                aircraft_type=self.aircraft_type
+            )
+
         state = self.result.state
         dag = self.dag
         n_fl = len(self.fl_choices)
@@ -2617,8 +2828,7 @@ class Optimizer:
         data = {
             "mach_number": wpts["mach_number"],
             "air_temperature": wpts["air_temperature"],
-            "u_wind": wpts["eastward_wind"],  # use u/v names for pycontrails compatibility
-            "v_wind": wpts["northward_wind"],
+            "tailwind": wpts["tailwind"],
             "node_index": wpts["node_index"],
             "sample_index": wpts["sample_index"],
         }
@@ -2640,8 +2850,7 @@ class Optimizer:
             for key, fill in (
                 ("mach_number", np.nan),
                 ("air_temperature", np.nan),
-                ("u_wind", np.nan),
-                ("v_wind", np.nan),
+                ("tailwind", np.nan),
                 ("eef_per_m", np.nan),
                 ("node_index", -1),
                 ("sample_index", -1),
@@ -2666,14 +2875,14 @@ class Optimizer:
         altitude_ft: float | None = None,
         time: pd.Timestamp | None = None,
         ax: "GeoAxes | None" = None,
-        show_wind_quiver: bool = True,
         show_eef: bool = True,
         **kwargs,
     ) -> "GeoAxes":
         """Plot met data on DAG nodes for a given flight level and time.
 
-        Draws a wind quiver overlay. When ``eef_per_m`` is available in the
-        :attr:`met_lookup`, also draws a scatter plot colored by EEF.
+        By default, plots tailwind if ``eef_per_m`` is unavailable in the :attr:`met_lookup`
+        and EEF per unit flight distance otherwise. This behavior can be overridden by
+        setting ``show_eef = False``.
 
         Parameters
         ----------
@@ -2685,8 +2894,9 @@ class Optimizer:
             uses the first available time step.
         ax : GeoAxes or None
             Cartopy GeoAxes to plot on. If None, calls ``self.dag.plot()`` to create one.
-        **kwargs
-            Passed to ``ax.quiver``.
+        show_eef: bool = True
+            Show EEF per unit flight distance if available. Set to ``False`` to show tailwind
+            even if EEF is available in the :attr:`met_lookup`.
 
         Returns
         -------
@@ -2728,8 +2938,7 @@ class Optimizer:
             sel = ds.sel(altitude_ft=altitude_ft, method="nearest")
             node_lon = self.dag.lon
             node_lat = self.dag.lat
-            u = sel["u_wind"].values
-            v = sel["v_wind"].values
+            tailwind = sel["tailwind"].values
             eef = sel["eef_per_m"].values if "eef_per_m" in ds else None
             sel_time = None
         else:
@@ -2744,17 +2953,9 @@ class Optimizer:
             node_sample_idx = self.met_lookup.edge_ptr[self.dag.adj_ptr[:-1][has_edges]]
             node_lon = self.dag.lon[has_edges]
             node_lat = self.dag.lat[has_edges]
-            u = sel.eastward_wind.values[node_sample_idx]
-            v = sel.northward_wind.values[node_sample_idx]
+            tailwind = sel.tailwind.values[node_sample_idx]
             eef = sel.eef_per_m.values[node_sample_idx] if "eef_per_m" in ds else None
             sel_time = pd.Timestamp(sel["time"].item())
-
-        if show_wind_quiver:
-            kwargs.setdefault("alpha", 0.6)
-            kwargs.setdefault("headwidth", 2)
-            kwargs.setdefault("headlength", 2)
-            kwargs.setdefault("headaxislength", 1.5)
-            ax.quiver(node_lon, node_lat, u, v, transform=ax.projection, **kwargs)
 
         if show_eef and eef is not None:
             finite = np.isfinite(eef)
@@ -2774,6 +2975,25 @@ class Optimizer:
             pos = ax.get_position()
             cax = fig.add_axes([pos.x0 + 0.02, pos.y0 + 0.04, pos.width * 0.3, 0.015])
             fig.colorbar(tcf, cax=cax, orientation="horizontal", label="EEF (J/m)")
+        else:
+            finite = np.isfinite(tailwind)
+            vmax = np.abs(tailwind[finite]).max()
+            tcf = ax.tricontourf(
+                node_lon[finite],
+                node_lat[finite],
+                tailwind[finite],
+                levels=20,
+                cmap="RdBu",
+                vmin=-vmax,
+                vmax=vmax,
+                transform=ax.projection,
+                zorder=0,
+            )
+            fig = ax.get_figure()
+            pos = ax.get_position()
+            cax = fig.add_axes([pos.x0 + 0.02, pos.y0 + 0.04, pos.width * 0.3, 0.015])
+            fig.colorbar(tcf, cax=cax, orientation="horizontal", label="Tailwind (m/s)")
+
 
         fl = round(sel["altitude_ft"].item() / 100)
         title = f"FL{fl}" if sel_time is None else f"FL{fl} — {sel_time:%Y-%m-%d %H:%M UTC}"
