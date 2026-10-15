@@ -587,11 +587,16 @@ class HorizontalDAG:
         dtype: type[np.floating] = np.float64,
     ) -> Self:
         """Build a DAG from a static undirected graph."""
-        if (icao:=origin.icao_code) not in ds["icao"]:
+        # Load the relevant coords once up front
+        # For Zarr-backed data, the .load occurs concurrently for all variables
+        network_vars = ["lon", "lat", "tail", "head", "airport_node"]
+        ds[network_vars].load()
+
+        if (icao := origin.icao_code) not in ds["icao"]:
             msg = f"Origin {icao} is not included in static graph."
             raise ValueError(msg)
 
-        if (icao:=dest.icao_code) not in ds["icao"]:
+        if (icao := dest.icao_code) not in ds["icao"]:
             msg = f"Destination {icao} is not included in static graph."
             raise ValueError(msg)
 
@@ -600,8 +605,8 @@ class HorizontalDAG:
         tail = ds["tail"].values
         head = ds["head"].values
 
-        origin_idx = ds["airport_node"].sel(icao=origin.icao_code).compute().item()
-        dest_idx = ds["airport_node"].sel(icao=dest.icao_code).compute().item()
+        origin_idx = ds["airport_node"].sel(icao=origin.icao_code).item()
+        dest_idx = ds["airport_node"].sel(icao=dest.icao_code).item()
         return cls.from_network(
             lon=lon.astype(dtype),
             lat=lat.astype(dtype),
@@ -610,7 +615,7 @@ class HorizontalDAG:
             origin_idx=origin_idx,
             dest_idx=dest_idx,
             max_angle_deg=max_angle_deg,
-            directed=False
+            directed=False,
         )
 
     @classmethod
@@ -625,7 +630,7 @@ class HorizontalDAG:
         max_angle_deg: float = 40.0,
         directed: bool = True,
     ) -> Self:
-        """Build a DAG from a directed network graph using the dual azimuth constraint."""
+        """Build a DAG from a network graph using the dual azimuth constraint."""
         edges, dists = _dual_az_edges(
             lon,
             lat,
@@ -634,7 +639,7 @@ class HorizontalDAG:
             origin_idx,
             dest_idx,
             max_angle_deg,
-            directed
+            directed,
         )
 
         n = len(lon)
@@ -910,7 +915,7 @@ def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
     (``air_temperature``, ``tailwind``, and optional ``eef_per_m``)
     with dimensions reordered to ``(edge, level, time)``.
     """
-    expected: tuple[str,...] = ("node",)
+    expected: tuple[str, ...] = ("node",)
     for required in ("lon", "lat"):
         if required not in ds:
             raise ValueError(f"Static graph missing required variable '{required}'")
@@ -1308,12 +1313,9 @@ class EdgeMetLookup:
         rev_index = pd.MultiIndex.from_arrays([lon[head], lat[head], lon[tail], lat[tail]])
 
         # Build MultiIndex to identify DAG edges based on endpoints
-        dag_index = pd.MultiIndex.from_arrays([
-            dag.lon[dag.edge_src],
-            dag.lat[dag.edge_src],
-            dag.lon[dag.adj],
-            dag.lat[dag.adj]
-        ])
+        dag_index = pd.MultiIndex.from_arrays(
+            [dag.lon[dag.edge_src], dag.lat[dag.edge_src], dag.lon[dag.adj], dag.lat[dag.adj]]
+        )
 
         # Match edges in dag to edge index in static graph
         _, fwd_map = fwd_index.reindex(dag_index)
@@ -1323,7 +1325,7 @@ class EdgeMetLookup:
         if rev_map is None:  # rev_index.equals(dag_index)
             rev_map = np.arange(rev_index.size)
         edge_map = np.maximum(fwd_map, rev_map)
-        rev_mask = (rev_map >= 0)
+        rev_mask = rev_map >= 0
 
         # Static graph is used to generate aggregated met lookup with two samples per edge
         # TODO: are two samples necessary?
@@ -1486,7 +1488,7 @@ def _dual_az_edges(
             origin_idx=origin_idx,
             dest_idx=dest_idx,
             max_angle_deg=max_angle_deg,
-            directed=True
+            directed=True,
         )
         edges = np.concat([edges, rev_edges])
         edge_dist = np.concat([edge_dist, rev_dist])
