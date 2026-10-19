@@ -8,5 +8,7 @@ uv.lock
 .venv
 .pytest_cache
 .ruff_cache
+.ipynb_checkpoints
+.virtual_documents
 docs/_build
 docs/api

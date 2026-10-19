@@ -577,6 +577,48 @@ class HorizontalDAG:
         return ax
 
     @classmethod
+    def from_static_graph(
+        cls,
+        ds: xr.Dataset,
+        origin: AirportCoords,
+        dest: AirportCoords,
+        max_angle_deg: float = 40.0,
+        max_dist_m: float = 500_000.0,
+        dtype: type[np.floating] = np.float64,
+    ) -> Self:
+        """Build a DAG from a static undirected graph."""
+        # Load the relevant coords once up front
+        # For Zarr-backed data, the .load occurs concurrently for all variables
+        network_vars = ["lon", "lat", "tail", "head", "airport_node"]
+        ds[network_vars].load()
+
+        if (icao := origin.icao_code) not in ds["icao"]:
+            msg = f"Origin {icao} is not included in static graph."
+            raise ValueError(msg)
+
+        if (icao := dest.icao_code) not in ds["icao"]:
+            msg = f"Destination {icao} is not included in static graph."
+            raise ValueError(msg)
+
+        lon = ds["lon"].values
+        lat = ds["lat"].values
+        tail = ds["tail"].values
+        head = ds["head"].values
+
+        origin_idx = ds["airport_node"].sel(icao=origin.icao_code).item()
+        dest_idx = ds["airport_node"].sel(icao=dest.icao_code).item()
+        return cls.from_network(
+            lon=lon.astype(dtype),
+            lat=lat.astype(dtype),
+            tail=tail,
+            head=head,
+            origin_idx=origin_idx,
+            dest_idx=dest_idx,
+            max_angle_deg=max_angle_deg,
+            directed=False,
+        )
+
+    @classmethod
     def from_network(
         cls,
         lon: npt.NDArray[np.floating],
@@ -585,10 +627,20 @@ class HorizontalDAG:
         head: npt.NDArray[np.int64],
         origin_idx: int = 0,
         dest_idx: int = -1,
-        max_angle_deg: float = 40.0
+        max_angle_deg: float = 40.0,
+        directed: bool = True,
     ) -> Self:
-        """Build a DAG from a static network graph using the dual azimuth constraint."""
-        edges, dists = _dual_az_edges(lon, lat, tail, head, origin_idx, dest_idx, max_angle_deg)
+        """Build a DAG from a network graph using the dual azimuth constraint."""
+        edges, dists = _dual_az_edges(
+            lon,
+            lat,
+            tail,
+            head,
+            origin_idx,
+            dest_idx,
+            max_angle_deg,
+            directed,
+        )
 
         n = len(lon)
         order = np.argsort(edges[:, 0])
@@ -822,7 +874,7 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
     """Validate and format a ``(waypoint, altitude_ft)`` flight profile for the track solver.
 
     Returns a dataset carrying the met variables under their original names
-    (``air_temperature``, ``u_wind``, ``v_wind``, and optional ``eef_per_m``),
+    (``air_temperature``, ``tailwind``, and optional ``eef_per_m``),
     each cast to float32 and oriented ``(waypoint, altitude_ft)``.
 
     NaN in the core weather variables raises, while NaN in ``eef_per_m`` is zero-filled.
@@ -833,12 +885,12 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
 
     _warn_if_ef_present(ds)
 
-    for required in ("air_temperature", "u_wind", "v_wind"):
+    for required in ("air_temperature", "tailwind"):
         if required not in ds:
             raise ValueError(f"flight profile is missing required variable '{required}'")
 
     data_vars = {}
-    for name in ("air_temperature", "u_wind", "v_wind", "eef_per_m"):
+    for name in ("air_temperature", "tailwind", "eef_per_m"):
         if name not in ds:
             continue
 
@@ -856,13 +908,56 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
     return xr.Dataset(data_vars, coords={"altitude_ft": ds["altitude_ft"].values})
 
 
+def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
+    """Validate a static graph for the 4D solver.
+
+    Returns a dataset carrying met variables under their original names
+    (``air_temperature``, ``tailwind``, and optional ``eef_per_m``)
+    with dimensions reordered to ``(edge, level, time)``.
+    """
+    expected: tuple[str, ...] = ("node",)
+    for required in ("lon", "lat"):
+        if required not in ds:
+            raise ValueError(f"Static graph missing required variable '{required}'")
+        if ds[required].dims != expected:
+            raise ValueError(f"Variable '{required}' does not have expected dimensions {expected}")
+
+    expected = ("edge",)
+    for required in ("tail", "head"):
+        if required not in ds:
+            raise ValueError(f"Static graph missing required variable '{required}'")
+        if ds[required].dims != expected:
+            raise ValueError(f"Variable '{required}' does not have expected dimensions {expected}")
+
+    if "airport_node" not in ds:
+        raise ValueError("Static graph missing required variable 'airport_node'")
+    if ds["airport_node"].dims != ("icao",):
+        raise ValueError("Variable 'airport_node' does not have expected dimensions ('icao',)")
+    if not np.isin(ds["airport_node"], ds["node"]).all():
+        raise ValueError("Variable 'airport_node' contains some values not in coordinate 'node'")
+
+    expected = ("edge", "level", "time")
+    variables: tuple[str, ...] = ("air_temperature", "tailwind")
+    if "eef_per_m" in ds:
+        variables += ("eef_per_m",)
+    for required in variables:
+        if required not in ds:
+            raise ValueError(f"Static graph missing required variable '{required}'")
+        try:
+            ds[required] = ds[required].transpose(*expected).astype(np.float32)
+        except ValueError as e:
+            msg = f"Could not transpose '{required}' to expected dimensions {expected}"
+            raise ValueError(msg) from e
+
+    return ds
+
+
 @dataclass(kw_only=True, slots=True, frozen=True)
 class EdgeInterpolation:
     """Met fields interpolated at sample points."""
 
     air_temperature: npt.NDArray[np.floating]
-    eastward_wind: npt.NDArray[np.floating]
-    northward_wind: npt.NDArray[np.floating]
+    tailwind: npt.NDArray[np.floating]
     eef_per_m: npt.NDArray[np.floating] | None
 
 
@@ -895,15 +990,29 @@ class EdgeMetLookup:
     #: Equal to ``diff(cum_dist)`` within each edge.
     delta_dist: npt.NDArray[np.floating]
 
-    #: Azimuth in radians from each sample to the next ``(n_samples,)``.
-    #: The last sample of each edge copies the previous sample's azimuth.
-    sample_azimuth: npt.NDArray[np.floating]
-
     def __post_init__(self) -> None:
-        required = {"air_temperature", "eastward_wind", "northward_wind"}
+        required = {"air_temperature", "tailwind"}
         missing = required - set(self.ds)
         if missing:
             raise ValueError(f"Met dataset missing required variables: {missing}")
+
+    @property
+    def is_aggregated(self) -> bool:
+        """Return True iff meteorology is aggregated on edges."""
+        if "edge" in self.ds.dims:
+            if "sample" in self.ds.dims:
+                msg = (
+                    "Cannot determine whether meteorology is held at samples or on edges. "
+                    "Ensure that dataset dimensions contain only one of 'sample' or 'edge'."
+                )
+                raise ValueError(msg)
+            return True
+        return False
+
+    @property
+    def has_eef_per_m(self) -> bool:
+        """Return True if meteorology includes contrail energy forcing."""
+        return "eef_per_m" in self.ds.variables
 
     def __repr__(self) -> str:
         n_samples = len(self.edge_idx)
@@ -939,6 +1048,9 @@ class EdgeMetLookup:
         EdgeInterpolation
             Interpolated met fields at the requested sample and time coordinates.
         """
+        if self.is_aggregated:
+            sample_idxs = self.edge_idx[sample_idxs]
+
         time_coords = self.ds["time"].values  # (n_time,) datetime64[ns]
         time_s = (time_coords - time_coords[0]) / np.timedelta64(1, "s")
         query_s = (times - time_coords[0]) / np.timedelta64(1, "s")
@@ -963,9 +1075,61 @@ class EdgeMetLookup:
 
         return EdgeInterpolation(
             air_temperature=_lerp("air_temperature"),
-            eastward_wind=_lerp("eastward_wind"),
-            northward_wind=_lerp("northward_wind"),
+            tailwind=_lerp("tailwind"),
             eef_per_m=_lerp("eef_per_m") if "eef_per_m" in self.ds else None,
+        )
+
+    def aggregate(self) -> Self:
+        """Return new EdgeMetLookup with fields aggregated along edges."""
+        # new EdgeMetLookup has just two samples per edge
+        n_edges = self.edge_ptr.size - 1
+
+        sample_lon = np.empty((2 * n_edges), dtype=self.sample_lon.dtype)
+        sample_lon[::2] = self.sample_lon[self.edge_ptr[:-1]]
+        sample_lon[1::2] = self.sample_lon[self.edge_ptr[1:] - 1]
+
+        sample_lat = np.empty((2 * n_edges), dtype=self.sample_lat.dtype)
+        sample_lat[::2] = self.sample_lat[self.edge_ptr[:-1]]
+        sample_lat[1::2] = self.sample_lat[self.edge_ptr[1:] - 1]
+
+        edge_idx = np.repeat(np.arange(n_edges), 2)
+        edge_ptr = np.arange(0, 2 * n_edges + 1, 2)
+
+        src_lon = np.repeat(sample_lon[::2], 2)
+        src_lat = np.repeat(sample_lat[::2], 2)
+        cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
+
+        last = edge_ptr[:-1] - 1
+        delta_dist = np.empty_like(cum_dist)
+        delta_dist[:-1] = np.diff(cum_dist)
+        delta_dist[last] = 0.0
+
+        # meteorology is stored as a *single* value per edge (distance-weighted mean).
+        # difference from unaggregated meteorology must be handled by __call__
+        ds = xr.Dataset(self.ds.coords).rename(sample="edge")
+        ds["edge"] = np.arange(n_edges)
+        edge_idx_da = xr.DataArray(data=self.edge_idx, coords=self.ds["sample"].coords)
+
+        # compute weights for trapezoidal integration
+        weight = np.zeros((self.ds.sizes["sample"]), dtype=self.delta_dist.dtype)
+        weight[1:] = self.delta_dist[:-1] + self.delta_dist[1:]
+        weight[0] = self.delta_dist[0]
+        weight_da = xr.DataArray(data=weight, coords=self.ds["sample"].coords)
+        norm_da = weight_da.groupby(edge_idx_da).sum()
+
+        for key, var in self.ds.data_vars.items():
+            new_var = (var * weight_da).groupby(edge_idx_da).sum() / norm_da
+            new_var = new_var.rename(group="edge")
+            ds[key] = new_var
+
+        return type(self)(
+            ds=ds,
+            edge_ptr=edge_ptr,
+            edge_idx=edge_idx,
+            sample_lon=sample_lon,
+            sample_lat=sample_lat,
+            cum_dist=cum_dist,
+            delta_dist=delta_dist,
         )
 
     @classmethod
@@ -1068,8 +1232,13 @@ class EdgeMetLookup:
         # exactly designed for this, so just call custom numpy-based bilinear_interp
         ds = bilinear_interp(ds, sample_lon, sample_lat)
 
+        # Compute tailwind component from vector winds
+        az = sample_azimuth[:, np.newaxis, np.newaxis]
+        ds["tailwind"] = ds["eastward_wind"] * np.sin(az) + ds["northward_wind"] * np.cos(az)
+
         # Raise on NaN in core weather - downstream computations would be poisoned.
-        for var in ("air_temperature", "eastward_wind", "northward_wind"):
+        variables = ["air_temperature", "tailwind"]
+        for var in variables:
             if ds[var].isnull().any():
                 raise ValueError(
                     f"NaN values found in '{var}' after interpolation onto samples. Fill "
@@ -1078,8 +1247,11 @@ class EdgeMetLookup:
                 )
 
         # NaN-fill eef_per_m with 0.0. If NaNs are kept, downstream computations would be poisoned.
-        if "eef_per_m" in ds:  # if eef is not None, this is skipped
+        if "eef_per_m" in ds and eef is None:
             ds["eef_per_m"] = ds["eef_per_m"].fillna(0.0)
+            variables.append("eef_per_m")
+
+        ds = ds[variables]
 
         # If a separate eef DataArray is provided, interpolate it onto sample points independently
         if eef is not None:
@@ -1118,14 +1290,110 @@ class EdgeMetLookup:
             sample_lat=sample_lat,
             cum_dist=cum_dist,
             delta_dist=delta_dist,
-            sample_azimuth=sample_azimuth,
+        )
+
+    @classmethod
+    def from_static_graph(
+        cls,
+        ds: xr.Dataset,
+        dag: HorizontalDAG,
+        altitude_ft: npt.NDArray[np.floating],
+        takeoff_time: pd.Timestamp,
+        flight_hours: int,
+        spacing_m: float = 25_000.0,
+    ) -> Self:
+        """Construct lookup from static graph."""
+        # Build MultiIndex to identify static edges based on endpoints.
+        # Two are required because static graph is undirected.
+        lon = ds["lon"].values.astype(dag.lon.dtype)
+        lat = ds["lat"].values.astype(dag.lat.dtype)
+        tail = ds["tail"].values
+        head = ds["head"].values
+        fwd_index = pd.MultiIndex.from_arrays([lon[tail], lat[tail], lon[head], lat[head]])
+        rev_index = pd.MultiIndex.from_arrays([lon[head], lat[head], lon[tail], lat[tail]])
+
+        # Build MultiIndex to identify DAG edges based on endpoints
+        dag_index = pd.MultiIndex.from_arrays(
+            [dag.lon[dag.edge_src], dag.lat[dag.edge_src], dag.lon[dag.adj], dag.lat[dag.adj]]
+        )
+
+        # Match edges in dag to edge index in static graph
+        _, fwd_map = fwd_index.reindex(dag_index)
+        if fwd_map is None:  # fwd_index.equals(dag_index)
+            fwd_map = np.arange(fwd_index.size)
+        _, rev_map = rev_index.reindex(dag_index)
+        if rev_map is None:  # rev_index.equals(dag_index)
+            rev_map = np.arange(rev_index.size)
+        edge_map = np.maximum(fwd_map, rev_map)
+        rev_mask = rev_map >= 0
+
+        # Static graph is used to generate aggregated met lookup with two samples per edge
+        # TODO: are two samples necessary?
+        n_edges = dag.n_edges
+        sample_lon = np.empty((2 * dag.n_edges), dtype=dag.lon.dtype)
+        sample_lon[::2] = dag.lon[dag.edge_src]
+        sample_lon[1::2] = dag.lon[dag.adj]
+
+        sample_lat = np.empty((2 * n_edges), dtype=dag.lat.dtype)
+        sample_lat[::2] = dag.lat[dag.edge_src]
+        sample_lat[1::2] = dag.lat[dag.adj]
+
+        edge_idx = np.repeat(np.arange(n_edges), 2)
+        edge_ptr = np.arange(0, 2 * n_edges + 1, 2)
+
+        src_lon = np.repeat(sample_lon[::2], 2)
+        src_lat = np.repeat(sample_lat[::2], 2)
+        cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
+
+        last = edge_ptr[:-1] - 1
+        delta_dist = np.empty_like(cum_dist)
+        delta_dist[:-1] = np.diff(cum_dist)
+        delta_dist[last] = 0.0
+
+        # Ensure variables
+        variables = ["air_temperature", "tailwind"]
+        if "eef_per_m" in ds:
+            variables.append("eef_per_m")
+        ds = ds[variables]
+
+        # Downselect in time
+        usable = select_flight_times(ds, takeoff_time, flight_hours)
+        ds = ds.sel(time=usable)
+
+        # Convert to altitude_ft coordinates and select vertically on FL choices
+        ds = to_altitude_ft(ds, altitude_ft)
+
+        # Reindex edges to align with DAG and load into memory
+        ds = ds.reindex(edge=edge_map).compute()
+
+        # Reverse tailwind where needed
+        mask = ~rev_mask[:, np.newaxis, np.newaxis]
+        ds["tailwind"] = ds["tailwind"].where(mask, other=-ds["tailwind"])
+
+        # Reset edge index
+        ds = ds.assign_coords(edge=np.arange(n_edges))
+
+        # Raise on NaN in any variables - downstream computations would be poisoned.
+        for var in variables:
+            if ds[var].isnull().any():
+                msg = f"NaN values found in '{var}' after constructing lookup from static graph."
+                raise ValueError(msg)
+
+        return cls(
+            ds=ds,
+            edge_ptr=edge_ptr,
+            edge_idx=edge_idx,
+            sample_lon=sample_lon,
+            sample_lat=sample_lat,
+            cum_dist=cum_dist,
+            delta_dist=delta_dist,
         )
 
 
 def _neighborhood_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
-    max_dist_m: float = 500_000.0
+    max_dist_m: float = 500_000.0,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Build network of directed edges based on distance constraint.
 
@@ -1155,7 +1423,8 @@ def _dual_az_edges(
     head: npt.NDArray[np.int64],
     origin_idx: int,
     dest_idx: int,
-    max_angle_deg: float = 40.0
+    max_angle_deg: float = 40.0,
+    directed: bool = True,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
     """Filter directed edges using azimuth and progress constraints.
 
@@ -1173,6 +1442,9 @@ def _dual_az_edges(
     and away from the origin, constraining edges to lie within a football-shaped corridor
     between origin and destination. The third makes the graph acyclic, since a cycle would
     have to return to the progress score it started from.
+
+    If ``directed`` is ``False``, edges from tail -> head and head -> tail are
+    both considered.
 
     Returns
     -------
@@ -1206,4 +1478,19 @@ def _dual_az_edges(
     )
     edges = np.column_stack([tail[keep], head[keep]])
     edge_dist = geo.haversine(lon[tail[keep]], lat[tail[keep]], lon[head[keep]], lat[head[keep]])
+
+    if not directed:
+        rev_edges, rev_dist = _dual_az_edges(
+            lon=lon,
+            lat=lat,
+            tail=head,
+            head=tail,
+            origin_idx=origin_idx,
+            dest_idx=dest_idx,
+            max_angle_deg=max_angle_deg,
+            directed=True,
+        )
+        edges = np.concat([edges, rev_edges])
+        edge_dist = np.concat([edge_dist, rev_dist])
+
     return edges, edge_dist

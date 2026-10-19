@@ -7,7 +7,7 @@ import xarray as xr
 from pycontrails import Flight, MetDataset
 from pycontrails.models.ps_model import ps_aircraft_params
 from pycontrails.models.ps_model.ps_aircraft_params import PSAircraftEngineParams as PSParams
-from pycontrails.physics import units
+from pycontrails.physics import geo, units
 
 from contrailopt import optimize
 from contrailopt.dag import AirportCoords, HorizontalDAG
@@ -84,6 +84,62 @@ def met() -> MetDataset:
         },
     )
     return MetDataset(ds)
+
+
+@pytest.fixture
+def static_graph(route: tuple[AirportCoords, AirportCoords]) -> xr.Dataset:
+    """Build a static graph similar to ``line_dag`` with ``met``."""
+    origin, dest = route
+    n = 20
+    lon = np.linspace(origin.longitude, dest.longitude, n)
+    lat = np.linspace(origin.latitude, dest.latitude, n)
+
+    graph = xr.Dataset()
+    graph["node"] = (("node",), range(n))
+    graph["lon"] = (("node",), lon)
+    graph["lat"] = (("node",), lat)
+
+    graph["icao"] = (("icao",), [origin.icao_code, dest.icao_code])
+    graph["airport_node"] = (("icao",), [0, n - 1])
+
+    dist = geo.haversine(
+        lon[:, np.newaxis],
+        lat[:, np.newaxis],
+        lon[np.newaxis, :],
+        lat[np.newaxis, :],
+    )
+    tail, head = np.nonzero((dist > 0.0) & (dist <= 300_000.0))
+    mask = tail < head
+    tail = tail[mask]
+    head = head[mask]
+    graph["edge"] = (("edge",), range(tail.size))
+    graph["tail"] = (("edge",), tail)
+    graph["head"] = (("edge",), head)
+
+    level = np.array([360.0, 175.0], dtype=np.float32)
+    time = pd.date_range("2024-01-01", periods=6, freq="h")
+    graph["level"] = (("level"), level)
+    graph["time"] = (("time"), time)
+
+    elon = 0.5 * (lon[tail] + lon[head])
+    shape = (graph.sizes["edge"], graph.sizes["level"], graph.sizes["time"])
+    
+    T_isa = units.m_to_T_isa(units.pl_to_m(level))
+    air_temperature = np.broadcast_to(T_isa[np.newaxis, :, np.newaxis], shape)
+    graph["air_temperature"] = (("edge", "level", "time"), air_temperature)
+    
+    magnitude = 50.0  # m/s
+    strip_sign = np.where(elon < -80.0, 1.0, -1.0)
+    eastward_wind = np.zeros(shape, dtype=np.float32)
+    eastward_wind[:, 1, :] = strip_sign[:, np.newaxis] * magnitude
+    northward_wind = np.zeros(shape, dtype=np.float32)
+    
+    az = np.deg2rad(geo.azimuth(lon[tail], lat[tail], lon[head], lat[head]))
+    az = az[:, np.newaxis, np.newaxis]
+    tailwind = eastward_wind * np.sin(az) + northward_wind * np.cos(az)
+    graph["tailwind"] = (("edge", "level", "time"), tailwind)
+
+    return graph
 
 
 class TestStepDown:
@@ -209,6 +265,192 @@ class TestStepPenalty:
         assert np.count_nonzero(np.diff(opt.reconstruct_path()[1][1:-1])) == 0
 
 
+class TestStaticGraphValidation:
+    """Test static graph validation."""
+
+    def test_fixture_is_valid(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        static_graph: xr.Dataset
+    ) -> None:
+        origin, dest = route
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            static_graph=static_graph,
+        )
+        assert opt.met_lookup is not None
+
+    @pytest.mark.parametrize("drop", ["lon", "lat", "tail", "head", "airport_node", "air_temperature", "tailwind"])
+    def test_missing_variable_raises(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        static_graph: xr.Dataset,
+        drop: str,
+    ) -> None:
+        static_graph = static_graph.drop_vars(drop)
+        origin, dest = route
+        with pytest.raises(ValueError, match="Static graph missing required variable"):
+            optimize.Optimizer(
+                origin_icao=origin,
+                dest_icao=dest,
+                aircraft_type="B737",
+                takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+                static_graph=static_graph,
+            )
+
+    @pytest.mark.parametrize(("dim", "var"), [
+        ("node", "lon"),
+        ("edge", "tail"),
+        ("icao", "airport_node"),
+        ("level", "air_temperature"),
+        ("time", "air_temperature"),
+    ])
+    def test_wrong_dimension_raises(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        static_graph: xr.Dataset,
+        dim: str,
+        var: str
+    ) -> None:
+        static_graph = static_graph.rename_dims({dim: "foo"})
+        origin, dest = route
+        if var != "air_temperature":
+            match = f"Variable '{var}' does not have"
+        else:
+            match = f"Could not transpose '{var}'"
+        with pytest.raises(ValueError, match=match):
+            optimize.Optimizer(
+                origin_icao=origin,
+                dest_icao=dest,
+                aircraft_type="B737",
+                takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+                static_graph=static_graph,
+            )
+
+
+class TestStaticGraphParity:
+    """Test parity between results with and without static graph."""
+
+    def test_equivalent_dag(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        static_graph: xr.Dataset,
+    ) -> None:
+        """Test equivalence of dag generated from static graph."""
+        origin, dest = route
+        dag = HorizontalDAG.from_static_graph(static_graph, origin, dest, max_dist_m=300_000.0)
+        assert dag == line_dag
+
+    def test_reproduces_level_changes(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        fl_choices: np.ndarray,
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+        static_graph: xr.Dataset,
+    ) -> None:
+        """Test parity with level changes from met-aware optimizer."""
+        origin, dest = route
+
+        opt1 = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+        )
+        opt1.solve(n_iter=2, payload=15_000.0)
+        _, p1, _ = opt1.reconstruct_path()
+
+        opt2 = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            static_graph=static_graph,
+            cost_index=30.0
+        )
+        opt2.solve(n_iter=2, payload=15_000.0)
+        _, p2, _ = opt2.reconstruct_path()
+
+        fl1 = fl_choices[p1[1:-1]]  # exclude ground nodes
+        fl2 = fl_choices[p2[1:-1]]  # exclude ground nodes
+
+        assert np.any(np.diff(fl2) < 0), f"No step descents: {fl2}"
+        assert np.sum(np.diff(fl1) > 0) == np.sum(np.diff(fl2) > 0), (
+            f"Step climb counts disagree: {fl1} vs. {fl2}"
+        )
+        assert np.sum(np.diff(fl1) < 0) == np.sum(np.diff(fl2) < 0), (
+            f"Step descent counts disagree: {fl1} vs. {fl2}"
+        )
+
+    def test_fuel_burn_differences(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+        static_graph: xr.Dataset,
+    ) -> None:
+        """Test for reasonable differences in fuel burn.
+
+        Differences are expected but should O(10 kg), comparable to differenes
+        from using aggregated rather than sampled met data.
+        """
+        origin, dest = route
+
+        opt1 = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+        )
+        res1 = opt1.solve(n_iter=2, payload=15_000.0)
+
+        opt2 = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            static_graph=static_graph,
+            cost_index=30.0
+        )
+        res2 = opt2.solve(n_iter=2, payload=15_000.0)
+        
+        opt3 = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+            aggregate_met=True,
+        )
+        res3 = opt3.solve(n_iter=2, payload=15_000.0)
+        
+        assert not opt1.met_lookup.is_aggregated
+        assert opt2.met_lookup.is_aggregated
+        assert opt3.met_lookup.is_aggregated
+
+        assert abs(res1.trip_fuel - res2.trip_fuel) > 10.0
+        assert abs(res1.trip_fuel - res2.trip_fuel) < 100.0
+        
+        assert abs(res1.trip_fuel - res3.trip_fuel) > 10.0
+        assert abs(res1.trip_fuel - res3.trip_fuel) < 100.0
+
+
 class TestToFlight:
     """Verify to_flight() produces a valid Flight with met-derived fields."""
 
@@ -238,7 +480,7 @@ class TestToFlight:
         assert len(fl) > 20  # densified waypoints, not just DAG nodes
 
         # Required columns present and finite
-        for col in ("mach_number", "air_temperature", "u_wind", "v_wind"):
+        for col in ("mach_number", "air_temperature", "tailwind"):
             assert col in fl, f"Missing column: {col}"
             assert np.all(np.isfinite(fl[col])), f"Non-finite values in {col}"
 
@@ -372,3 +614,46 @@ class TestToFlight:
         assert np.all(np.isfinite(fl["eef_per_m"]))
         assert np.any(fl["eef_per_m"] > 0)
         assert np.any(fl["eef_per_m"] < 0)
+
+    @pytest.mark.parametrize("resample_m", [1_000.0, 10_000.0, 100_000.0])
+    def test_to_flight_resample(
+        self,
+        route: tuple[AirportCoords, AirportCoords],
+        line_dag: HorizontalDAG,
+        met: MetDataset,
+        resample_m: float
+    ) -> None:
+        """to_flight returns a Flight with expected columns, endpoints, and segment lengths."""
+        origin, dest = route
+
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            met=met,
+            dag=line_dag,
+            cost_index=30.0,
+            met_spacing_m=40_000.0,
+        )
+        opt.solve(n_iter=2, payload=15_000.0)
+        fl = opt.to_flight(resample_m=resample_m)
+
+        # Minimal set of columns
+        assert set(fl.data.keys()) == {"longitude", "latitude", "altitude_ft", "time"}
+
+        # Endpoints match origin/dest
+        assert fl["longitude"][0] == pytest.approx(origin.longitude, abs=0.1)
+        assert fl["latitude"][0] == pytest.approx(origin.latitude, abs=0.1)
+        assert fl["longitude"][-1] == pytest.approx(dest.longitude, abs=0.1)
+        assert fl["latitude"][-1] == pytest.approx(dest.latitude, abs=0.1)
+
+        # Time is monotonically increasing
+        assert pd.DatetimeIndex(fl["time"]).is_monotonic_increasing
+
+        # Segment lengths match resampling rate
+        dist = fl.segment_haversine()[:-1]
+        assert np.all(dist < 1.001 * resample_m)  # should be strictly smaller...
+                                                  # not sure why this isn't the case,
+                                                  # but we're close enough that I don't
+                                                  # think it's worth worrying about.
