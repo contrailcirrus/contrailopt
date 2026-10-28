@@ -1274,6 +1274,7 @@ class EdgeMetLookup:
             delta_dist=delta_dist,
         )
 
+
 def _neighborhood_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],

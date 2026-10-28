@@ -844,7 +844,6 @@ class _ProfileArrays:
 
     @classmethod
     def build(cls, dag: HorizontalDAG | Track, profile: xr.Dataset) -> Self:
-        lon, lat = dag.lon, dag.lat
         return cls(
             air_temperature=profile["air_temperature"].values,
             tailwind=profile["tailwind"].values,
@@ -1894,13 +1893,13 @@ class Optimizer:
 
             if met is not None:
                 msg = "met is not used when static_graph is provided."
-                warnings.warn(msg)
+                warnings.warn(msg, stacklevel=2)
             if eef is not None:
                 msg = "eef is not used when static_graph is provided."
-                warnings.warn(msg)
+                warnings.warn(msg, stacklevel=2)
             if dag is not None:
                 msg = "dag is not used when static_graph is provided."
-                warnings.warn(msg)
+                warnings.warn(msg, stacklevel=2)
 
             flight_hours = flight_hours or estimate_flight_hours(
                 self.origin, self.dest, self.atyp.m_des
