@@ -103,17 +103,25 @@ def _reachability(
     return seen
 
 
+def _csr_ptr(src: npt.NDArray[np.int64], n_nodes: int) -> npt.NDArray[np.int64]:
+    """Return CSR row pointers ``(n_nodes + 1,)`` for edges whose source nodes are ``src``.
+
+    Row ``i`` spans ``ptr[i]:ptr[i + 1]``, so ``src`` must be sorted for the pointers to
+    index the edges themselves.
+    """
+    ptr = np.zeros(n_nodes + 1, dtype=np.int64)
+    np.add.at(ptr[1:], src, 1)
+    np.cumsum(ptr, out=ptr)
+    return ptr
+
+
 def _reverse_csr(
     adj: npt.NDArray[np.int64],
     n_nodes: int,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Compute reverse CSR pointer and edge permutation order."""
     order = np.argsort(adj)
-
-    rev_ptr = np.zeros(n_nodes + 1, dtype=np.int64)
-    np.add.at(rev_ptr[1:], adj, 1)
-    np.cumsum(rev_ptr, out=rev_ptr)
-
+    rev_ptr = _csr_ptr(adj, n_nodes)
     return rev_ptr, order
 
 
@@ -354,9 +362,7 @@ class HorizontalDAG:
         new_edge_dist = self.edge_dist[mask]
 
         # Build new CSR (already sorted by source from parent CSR)
-        adj_ptr = np.zeros(n + 1, dtype=np.int64)
-        np.add.at(adj_ptr[1:], new_src, 1)
-        np.cumsum(adj_ptr, out=adj_ptr)
+        adj_ptr = _csr_ptr(new_src, n)
 
         return type(self)(
             lon=self.lon[live],
@@ -420,9 +426,7 @@ class HorizontalDAG:
         kept_dst = self.adj[keep]
         kept_dist = self.edge_dist[keep]
 
-        adj_ptr = np.zeros(self.n_nodes + 1, dtype=np.int64)
-        np.add.at(adj_ptr[1:], kept_src, 1)
-        np.cumsum(adj_ptr, out=adj_ptr)
+        adj_ptr = _csr_ptr(kept_src, self.n_nodes)
 
         return type(self)(
             lon=self.lon,
@@ -459,9 +463,7 @@ class HorizontalDAG:
         kept_dist = self.edge_dist[keep]
 
         # Rebuild CSR
-        adj_ptr = np.zeros(self.n_nodes + 1, dtype=np.int64)
-        np.add.at(adj_ptr[1:], kept_src, 1)
-        np.cumsum(adj_ptr, out=adj_ptr)
+        adj_ptr = _csr_ptr(kept_src, self.n_nodes)
 
         return type(self)(
             lon=self.lon,
@@ -628,9 +630,7 @@ class HorizontalDAG:
 
         n = len(lon)
         order = np.argsort(edges[:, 0])
-        adj_ptr = np.zeros(n + 1, dtype=np.int64)
-        np.add.at(adj_ptr[1:], edges[order, 0], 1)
-        np.cumsum(adj_ptr, out=adj_ptr)
+        adj_ptr = _csr_ptr(edges[order, 0], n)
 
         return cls(
             lon=lon,
@@ -1493,9 +1493,7 @@ def _select_static_edges(
         s = s[~excluded]
 
     # Keep edges between nodes reachable from the origin that also reach the destination
-    adj_ptr = np.zeros(lon.size + 1, dtype=np.int64)
-    np.add.at(adj_ptr[1:], cand_src[s], 1)
-    np.cumsum(adj_ptr, out=adj_ptr)
+    adj_ptr = _csr_ptr(cand_src[s], lon.size)
     live = _live_nodes(adj_ptr, cand_dst[s], h_origin, h_dest)
     if not live[h_origin] or not live[h_dest]:
         raise ValueError("Origin or destination became unreachable after pruning")
@@ -1531,9 +1529,7 @@ def _dag_from_edges(
     lon = lon[used]
     lat = lat[used]
 
-    adj_ptr = np.zeros(n_used + 1, dtype=np.int64)
-    np.add.at(adj_ptr[1:], src, 1)
-    np.cumsum(adj_ptr, out=adj_ptr)
+    adj_ptr = _csr_ptr(src, n_used)
 
     return HorizontalDAG(
         lon=lon,
