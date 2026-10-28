@@ -117,6 +117,53 @@ def _reverse_csr(
     return rev_ptr, order
 
 
+def _live_nodes(
+    adj_ptr: npt.NDArray[np.int64],
+    adj: npt.NDArray[np.int64],
+    h_origin: int,
+    h_dest: int,
+) -> npt.NDArray[np.bool_]:
+    """Return a mask of nodes reachable from ``h_origin`` that also reach ``h_dest``."""
+    n_nodes = adj_ptr.size - 1
+    src = np.repeat(np.arange(n_nodes, dtype=np.int64), np.diff(adj_ptr))
+    fwd = _reachability(h_origin, n_nodes, adj_ptr, adj)
+
+    rev_ptr, rev_order = _reverse_csr(adj, n_nodes)
+    bwd = _reachability(h_dest, n_nodes, rev_ptr, src[rev_order])
+
+    return fwd & bwd
+
+
+def _polygon_excluded(
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
+    src: npt.NDArray[np.int64],
+    dst: npt.NDArray[np.int64],
+    polygons: list[list[tuple[float, float]]],
+) -> npt.NDArray[np.bool_]:
+    """Return a mask of edges ``src -> dst`` that intersect any polygon.
+
+    Uses spherely for geodesic intersection tests on the sphere.
+    """
+    import spherely
+
+    # Build a linestring for every edge
+    linestrings = [
+        spherely.create_linestring([(lon[s], lat[s]), (lon[d], lat[d])])
+        for s, d in zip(src, dst, strict=True)
+    ]
+    edge_geoms = np.array(linestrings)
+
+    # Test each polygon against all edges. We could also take a union of all polygons
+    # and test once if this becomes a bottleneck
+    excluded = np.zeros(src.size, dtype=bool)
+    for coords in polygons:
+        poly = spherely.create_polygon(coords)
+        excluded |= spherely.intersects(poly, edge_geoms)
+
+    return excluded
+
+
 @dataclass(kw_only=True, slots=True, frozen=True)
 class HorizontalDAG:
     """Directed graph on (lon, lat) nodes with CSR adjacency.
@@ -290,13 +337,7 @@ class HorizontalDAG:
     def prune_unreachable(self) -> Self:
         """Return a new DAG with only nodes reachable from origin that also reach dest."""
         src = self.edge_src
-        fwd = _reachability(self.h_origin, self.n_nodes, self.adj_ptr, self.adj)
-
-        rev_ptr, rev_order = _reverse_csr(self.adj, self.n_nodes)
-        rev_adj = src[rev_order]
-        bwd = _reachability(self.h_dest, self.n_nodes, rev_ptr, rev_adj)
-
-        live = fwd & bwd
+        live = _live_nodes(self.adj_ptr, self.adj, self.h_origin, self.h_dest)
 
         if not live[self.h_origin] or not live[self.h_dest]:
             raise ValueError("Origin or destination became unreachable after pruning")
@@ -408,23 +449,8 @@ class HorizontalDAG:
         HorizontalDAG
             A new DAG with offending edges removed and then pruned.
         """
-        import spherely
-
         src = self.edge_src
-
-        # Build a linestring for every edge
-        linestrings = [
-            spherely.create_linestring([(self.lon[s], self.lat[s]), (self.lon[d], self.lat[d])])
-            for s, d in zip(src, self.adj, strict=True)
-        ]
-        edge_geoms = np.array(linestrings)
-
-        # Test each polygon against all edges. We could also take a union of all polygons
-        # and test once if this becomes a bottleneck
-        excluded = np.zeros(self.n_edges, dtype=bool)
-        for coords in polygons:
-            poly = spherely.create_polygon(coords)
-            excluded |= spherely.intersects(poly, edge_geoms)
+        excluded = _polygon_excluded(self.lon, self.lat, src, self.adj, polygons)
 
         # Build filtered edge list
         keep = ~excluded
@@ -575,48 +601,6 @@ class HorizontalDAG:
 
         ax.set_title(f"{self.n_edges} edges, {self.n_nodes} nodes")
         return ax
-
-    @classmethod
-    def from_static_graph(
-        cls,
-        ds: xr.Dataset,
-        origin: AirportCoords,
-        dest: AirportCoords,
-        max_angle_deg: float = 40.0,
-        max_dist_m: float = 500_000.0,
-        dtype: type[np.floating] = np.float64,
-    ) -> Self:
-        """Build a DAG from a static undirected graph."""
-        # Load the relevant coords once up front
-        # For Zarr-backed data, the .load occurs concurrently for all variables
-        network_vars = ["lon", "lat", "tail", "head", "airport_node"]
-        ds[network_vars].load()
-
-        if (icao := origin.icao_code) not in ds["icao"]:
-            msg = f"Origin {icao} is not included in static graph."
-            raise ValueError(msg)
-
-        if (icao := dest.icao_code) not in ds["icao"]:
-            msg = f"Destination {icao} is not included in static graph."
-            raise ValueError(msg)
-
-        lon = ds["lon"].values
-        lat = ds["lat"].values
-        tail = ds["tail"].values
-        head = ds["head"].values
-
-        origin_idx = ds["airport_node"].sel(icao=origin.icao_code).item()
-        dest_idx = ds["airport_node"].sel(icao=dest.icao_code).item()
-        return cls.from_network(
-            lon=lon.astype(dtype),
-            lat=lat.astype(dtype),
-            tail=tail,
-            head=head,
-            origin_idx=origin_idx,
-            dest_idx=dest_idx,
-            max_angle_deg=max_angle_deg,
-            directed=False,
-        )
 
     @classmethod
     def from_network(
@@ -933,8 +917,6 @@ def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
         raise ValueError("Static graph missing required variable 'airport_node'")
     if ds["airport_node"].dims != ("icao",):
         raise ValueError("Variable 'airport_node' does not have expected dimensions ('icao',)")
-    if not np.isin(ds["airport_node"], ds["node"]).all():
-        raise ValueError("Variable 'airport_node' contains some values not in coordinate 'node'")
 
     expected = ("edge", "level", "time")
     variables: tuple[str, ...] = ("air_temperature", "tailwind")
@@ -1084,11 +1066,11 @@ class EdgeMetLookup:
         # new EdgeMetLookup has just two samples per edge
         n_edges = self.edge_ptr.size - 1
 
-        sample_lon = np.empty((2 * n_edges), dtype=self.sample_lon.dtype)
+        sample_lon = np.empty(2 * n_edges, dtype=self.sample_lon.dtype)
         sample_lon[::2] = self.sample_lon[self.edge_ptr[:-1]]
         sample_lon[1::2] = self.sample_lon[self.edge_ptr[1:] - 1]
 
-        sample_lat = np.empty((2 * n_edges), dtype=self.sample_lat.dtype)
+        sample_lat = np.empty(2 * n_edges, dtype=self.sample_lat.dtype)
         sample_lat[::2] = self.sample_lat[self.edge_ptr[:-1]]
         sample_lat[1::2] = self.sample_lat[self.edge_ptr[1:] - 1]
 
@@ -1292,104 +1274,6 @@ class EdgeMetLookup:
             delta_dist=delta_dist,
         )
 
-    @classmethod
-    def from_static_graph(
-        cls,
-        ds: xr.Dataset,
-        dag: HorizontalDAG,
-        altitude_ft: npt.NDArray[np.floating],
-        takeoff_time: pd.Timestamp,
-        flight_hours: int,
-        spacing_m: float = 25_000.0,
-    ) -> Self:
-        """Construct lookup from static graph."""
-        # Build MultiIndex to identify static edges based on endpoints.
-        # Two are required because static graph is undirected.
-        lon = ds["lon"].values.astype(dag.lon.dtype)
-        lat = ds["lat"].values.astype(dag.lat.dtype)
-        tail = ds["tail"].values
-        head = ds["head"].values
-        fwd_index = pd.MultiIndex.from_arrays([lon[tail], lat[tail], lon[head], lat[head]])
-        rev_index = pd.MultiIndex.from_arrays([lon[head], lat[head], lon[tail], lat[tail]])
-
-        # Build MultiIndex to identify DAG edges based on endpoints
-        dag_index = pd.MultiIndex.from_arrays(
-            [dag.lon[dag.edge_src], dag.lat[dag.edge_src], dag.lon[dag.adj], dag.lat[dag.adj]]
-        )
-
-        # Match edges in dag to edge index in static graph
-        _, fwd_map = fwd_index.reindex(dag_index)
-        if fwd_map is None:  # fwd_index.equals(dag_index)
-            fwd_map = np.arange(fwd_index.size)
-        _, rev_map = rev_index.reindex(dag_index)
-        if rev_map is None:  # rev_index.equals(dag_index)
-            rev_map = np.arange(rev_index.size)
-        edge_map = np.maximum(fwd_map, rev_map)
-        rev_mask = rev_map >= 0
-
-        # Static graph is used to generate aggregated met lookup with two samples per edge
-        # TODO: are two samples necessary?
-        n_edges = dag.n_edges
-        sample_lon = np.empty((2 * dag.n_edges), dtype=dag.lon.dtype)
-        sample_lon[::2] = dag.lon[dag.edge_src]
-        sample_lon[1::2] = dag.lon[dag.adj]
-
-        sample_lat = np.empty((2 * n_edges), dtype=dag.lat.dtype)
-        sample_lat[::2] = dag.lat[dag.edge_src]
-        sample_lat[1::2] = dag.lat[dag.adj]
-
-        edge_idx = np.repeat(np.arange(n_edges), 2)
-        edge_ptr = np.arange(0, 2 * n_edges + 1, 2)
-
-        src_lon = np.repeat(sample_lon[::2], 2)
-        src_lat = np.repeat(sample_lat[::2], 2)
-        cum_dist = geo.haversine(src_lon, src_lat, sample_lon, sample_lat)
-
-        last = edge_ptr[:-1] - 1
-        delta_dist = np.empty_like(cum_dist)
-        delta_dist[:-1] = np.diff(cum_dist)
-        delta_dist[last] = 0.0
-
-        # Ensure variables
-        variables = ["air_temperature", "tailwind"]
-        if "eef_per_m" in ds:
-            variables.append("eef_per_m")
-        ds = ds[variables]
-
-        # Downselect in time
-        usable = select_flight_times(ds, takeoff_time, flight_hours)
-        ds = ds.sel(time=usable)
-
-        # Convert to altitude_ft coordinates and select vertically on FL choices
-        ds = to_altitude_ft(ds, altitude_ft)
-
-        # Reindex edges to align with DAG and load into memory
-        ds = ds.reindex(edge=edge_map).compute()
-
-        # Reverse tailwind where needed
-        mask = ~rev_mask[:, np.newaxis, np.newaxis]
-        ds["tailwind"] = ds["tailwind"].where(mask, other=-ds["tailwind"])
-
-        # Reset edge index
-        ds = ds.assign_coords(edge=np.arange(n_edges))
-
-        # Raise on NaN in any variables - downstream computations would be poisoned.
-        for var in variables:
-            if ds[var].isnull().any():
-                msg = f"NaN values found in '{var}' after constructing lookup from static graph."
-                raise ValueError(msg)
-
-        return cls(
-            ds=ds,
-            edge_ptr=edge_ptr,
-            edge_idx=edge_idx,
-            sample_lon=sample_lon,
-            sample_lat=sample_lat,
-            cum_dist=cum_dist,
-            delta_dist=delta_dist,
-        )
-
-
 def _neighborhood_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
@@ -1416,7 +1300,7 @@ def _neighborhood_edges(
     return np.nonzero((dist > 0.0) & (dist <= max_dist_m))
 
 
-def _dual_az_edges(
+def _dual_az_keep(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
     tail: npt.NDArray[np.int64],
@@ -1424,9 +1308,8 @@ def _dual_az_edges(
     origin_idx: int,
     dest_idx: int,
     max_angle_deg: float = 40.0,
-    directed: bool = True,
-) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
-    """Filter directed edges using azimuth and progress constraints.
+) -> npt.NDArray[np.bool_]:
+    """Return a mask of edges ``tail -> head`` that pass the azimuth and progress constraints.
 
     For each pair of nodes within ``max_dist_m``, the directed edge tail -> head
     is included iff:
@@ -1442,16 +1325,6 @@ def _dual_az_edges(
     and away from the origin, constraining edges to lie within a football-shaped corridor
     between origin and destination. The third makes the graph acyclic, since a cycle would
     have to return to the progress score it started from.
-
-    If ``directed`` is ``False``, edges from tail -> head and head -> tail are
-    both considered.
-
-    Returns
-    -------
-    edges : npt.NDArray[np.int64]
-        ``(m, 2)`` array of ``[tail, head]`` index pairs.
-    edge_dist : npt.NDArray[np.floating]
-        ``(m,)`` haversine distances in meters. The dtype matches the input lon/lat dtype.
     """
     # Precompute per-node azimuths from each node to dest and origin
     az_to_dest = geo.azimuth(lon, lat, lon[dest_idx], lat[dest_idx])
@@ -1471,11 +1344,36 @@ def _dual_az_edges(
     delta_tail = np.abs((az_at_tail - az_to_dest[tail] + 180.0) % 360.0 - 180.0)
     delta_head = np.abs((at_at_head - az_to_origin[head] + 180.0) % 360.0 - 180.0)
 
-    keep = (
+    return (
         (delta_tail <= max_angle_deg)
         & (delta_head <= max_angle_deg)
         & (progress[head] > progress[tail])
     )
+
+
+def _dual_az_edges(
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
+    tail: npt.NDArray[np.int64],
+    head: npt.NDArray[np.int64],
+    origin_idx: int,
+    dest_idx: int,
+    max_angle_deg: float = 40.0,
+    directed: bool = True,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.floating]]:
+    """Filter directed edges with the constraints of :func:`_dual_az_keep`.
+
+    If ``directed`` is ``False``, edges from tail -> head and head -> tail are
+    both considered.
+
+    Returns
+    -------
+    edges : npt.NDArray[np.int64]
+        ``(m, 2)`` array of ``[tail, head]`` index pairs.
+    edge_dist : npt.NDArray[np.floating]
+        ``(m,)`` haversine distances in meters. The dtype matches the input lon/lat dtype.
+    """
+    keep = _dual_az_keep(lon, lat, tail, head, origin_idx, dest_idx, max_angle_deg)
     edges = np.column_stack([tail[keep], head[keep]])
     edge_dist = geo.haversine(lon[tail[keep]], lat[tail[keep]], lon[head[keep]], lat[head[keep]])
 
@@ -1494,3 +1392,225 @@ def _dual_az_edges(
         edge_dist = np.concat([edge_dist, rev_dist])
 
     return edges, edge_dist
+
+
+def prepare_static_graph(
+    origin: AirportCoords,
+    dest: AirportCoords,
+    ds: xr.Dataset,
+    avoidance_regions: list[list[tuple[float, float]]] | None,
+    altitude_ft: npt.NDArray[np.floating],
+    takeoff_time: pd.Timestamp,
+    flight_hours: int,
+    dtype: type[np.floating] = np.float64,
+    max_angle_deg: float = 40.0,
+) -> tuple[HorizontalDAG, EdgeMetLookup]:
+    """Return the solver's DAG and static met lookup based on a global graph."""
+    # Load the core graph variables once up front
+    # For Zarr-backed data, the .load occurs concurrently for all variables,
+    # and provides a speedup for downstream logic
+    network_vars = ["lon", "lat", "tail", "head", "airport_node"]
+    ds[network_vars].load()
+
+    if not np.isin(ds["airport_node"], ds["node"]).all():
+        raise ValueError("Variable 'airport_node' contains some values not in coordinate 'node'")
+
+    if (icao := origin.icao_code) not in ds["icao"]:
+        msg = f"Origin {icao} is not included in static graph."
+        raise ValueError(msg)
+
+    if (icao := dest.icao_code) not in ds["icao"]:
+        msg = f"Destination {icao} is not included in static graph."
+        raise ValueError(msg)
+
+    lon = ds["lon"].values.astype(dtype)
+    lat = ds["lat"].values.astype(dtype)
+    h_origin = ds["airport_node"].sel(icao=origin.icao_code).item()
+    h_dest = ds["airport_node"].sel(icao=dest.icao_code).item()
+
+    ds_edge, reversed_, src, dst = _select_static_edges(
+        lon,
+        lat,
+        ds["tail"].values,
+        ds["head"].values,
+        h_origin,
+        h_dest,
+        max_angle_deg,
+        avoidance_regions,
+    )
+    dag = _dag_from_edges(lon, lat, src, dst, h_origin, h_dest)
+    met_lookup = _static_met_lookup(
+        ds, dag, ds_edge, reversed_, altitude_ft, takeoff_time, flight_hours
+    )
+    return dag, met_lookup
+
+
+def _select_static_edges(
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
+    tail: npt.NDArray[np.int64],
+    head: npt.NDArray[np.int64],
+    h_origin: int,
+    h_dest: int,
+    max_angle_deg: float,
+    avoidance_regions: list[list[tuple[float, float]]] | None,
+) -> tuple[
+    npt.NDArray[np.int64],
+    npt.NDArray[np.bool_],
+    npt.NDArray[np.int64],
+    npt.NDArray[np.int64],
+]:
+    """Select the static graph edges for one origin-destination pair, sorted by source node.
+
+    ``lon`` and ``lat`` have shape ``(n,)``. ``tail`` and ``head`` have shape ``(m,)``
+    and hold node indices into ``lon`` and ``lat``.
+
+    Returns
+    -------
+    ds_edge : npt.NDArray[np.int64]
+        Position of each selected edge in ``tail``/``head``.
+    reversed_ : npt.NDArray[np.bool_]
+        True where the selected edge is traversed ``head -> tail``.
+    src, dst : npt.NDArray[np.int64]
+        Source and destination node of each selected edge, in the direction traversed.
+    """
+    # Candidate directed edges are every edge of ds in both directions
+    # candidate i is edge i traversed tail -> head
+    # candidate m + i is edge i traversed head -> tail
+    m = tail.size
+    cand_src = np.concat([tail, head])
+    cand_dst = np.concat([head, tail])
+
+    keep = _dual_az_keep(lon, lat, cand_src, cand_dst, h_origin, h_dest, max_angle_deg)
+    s = np.flatnonzero(keep)  # "s" for selected
+
+    order = np.argsort(cand_src[s])  # sort by source node as needed for CSR adjacency
+    s = s[order]
+
+    if avoidance_regions:
+        excluded = _polygon_excluded(lon, lat, cand_src[s], cand_dst[s], avoidance_regions)
+        s = s[~excluded]
+
+    # Keep edges between nodes reachable from the origin that also reach the destination
+    adj_ptr = np.zeros(lon.size + 1, dtype=np.int64)
+    np.add.at(adj_ptr[1:], cand_src[s], 1)
+    np.cumsum(adj_ptr, out=adj_ptr)
+    live = _live_nodes(adj_ptr, cand_dst[s], h_origin, h_dest)
+    if not live[h_origin] or not live[h_dest]:
+        raise ValueError("Origin or destination became unreachable after pruning")
+
+    s = s[live[cand_src[s]] & live[cand_dst[s]]]
+
+    return s % m, s >= m, cand_src[s], cand_dst[s]
+
+
+def _dag_from_edges(
+    lon: npt.NDArray[np.floating],
+    lat: npt.NDArray[np.floating],
+    src: npt.NDArray[np.int64],
+    dst: npt.NDArray[np.int64],
+    h_origin: int,
+    h_dest: int,
+) -> HorizontalDAG:
+    """Build a DAG from edges ``src -> dst`` on only the nodes they touch.
+
+    ``lon`` and ``lat`` have shape ``(n,)``. ``src`` and ``dst`` hold node indices into
+    ``lon`` and ``lat`` for each edge. The param ``src`` must be sorted. The returned DAG
+    renumbers the kept nodes ``0, 1, ...`` in their original order.
+    """
+    used = np.zeros(lon.size, dtype=bool)
+    used[src] = True
+    used[dst] = True
+
+    n_used = used.sum().item()
+    new_idx = np.full(lon.size, -1, dtype=np.int64)
+    new_idx[used] = np.arange(n_used, dtype=np.int64)
+    src = new_idx[src]
+    dst = new_idx[dst]
+    lon = lon[used]
+    lat = lat[used]
+
+    adj_ptr = np.zeros(n_used + 1, dtype=np.int64)
+    np.add.at(adj_ptr[1:], src, 1)
+    np.cumsum(adj_ptr, out=adj_ptr)
+
+    return HorizontalDAG(
+        lon=lon,
+        lat=lat,
+        adj_ptr=adj_ptr,
+        adj=dst,
+        edge_dist=geo.haversine(lon[src], lat[src], lon[dst], lat[dst]),
+        h_origin=new_idx[h_origin].item(),
+        h_dest=new_idx[h_dest].item(),
+    )
+
+
+def _static_met_lookup(
+    ds: xr.Dataset,
+    dag: HorizontalDAG,
+    ds_edge: npt.NDArray[np.int64],
+    reversed_: npt.NDArray[np.bool_],
+    altitude_ft: npt.NDArray[np.floating],
+    takeoff_time: pd.Timestamp,
+    flight_hours: int,
+) -> EdgeMetLookup:
+    """Read the met for each DAG edge from the static graph ``ds``.
+
+    DAG edge ``i`` is edge ``ds_edge[i]`` of ``ds``. Where ``reversed_[i]`` is True, the DAG
+    traverses that edge ``head -> tail`` and its tailwind is negated.
+    """
+    # Static graph is used to generate aggregated met lookup with two samples per edge
+    # TODO: are two samples necessary?
+    # If / when we refactor to require aggregated met, we can remove edge sample points
+    # Each edge has one sample at its source (cum_dist 0) and one at its destination
+    src = dag.edge_src
+    dst = dag.adj
+    edge_dist = dag.edge_dist
+    n_edges = dag.n_edges
+    sample_lon = np.column_stack([dag.lon[src], dag.lon[dst]]).ravel()
+    sample_lat = np.column_stack([dag.lat[src], dag.lat[dst]]).ravel()
+    edge_idx = np.repeat(np.arange(n_edges), 2)
+    edge_ptr = np.arange(0, 2 * n_edges + 1, 2)
+    cum_dist = np.zeros(2 * n_edges, dtype=edge_dist.dtype)
+    cum_dist[1::2] = edge_dist
+    delta_dist = np.zeros(2 * n_edges, dtype=edge_dist.dtype)
+    delta_dist[::2] = edge_dist
+
+    # Ensure variables
+    variables = ["air_temperature", "tailwind"]
+    if "eef_per_m" in ds:
+        variables.append("eef_per_m")
+    met = ds[variables]
+
+    # Downselect in time
+    usable = select_flight_times(met, takeoff_time, flight_hours)
+    met = met.sel(time=usable)
+
+    # Convert to altitude_ft coordinates and select vertically on FL choices
+    met = to_altitude_ft(met, altitude_ft)
+
+    # Select the DAG's edges in DAG order and load into memory
+    met = met.isel(edge=ds_edge).compute()
+
+    # Reverse tailwind where needed
+    mask = ~reversed_[:, np.newaxis, np.newaxis]
+    met["tailwind"] = met["tailwind"].where(mask, other=-met["tailwind"])
+
+    # Reset edge index
+    met = met.assign_coords(edge=np.arange(n_edges))
+
+    # Raise on NaN in any variables - downstream computations would be poisoned.
+    for var in variables:
+        if met[var].isnull().any():
+            msg = f"NaN values found in '{var}' after constructing lookup from static graph."
+            raise ValueError(msg)
+
+    return EdgeMetLookup(
+        ds=met,
+        edge_ptr=edge_ptr,
+        edge_idx=edge_idx,
+        sample_lon=sample_lon,
+        sample_lat=sample_lat,
+        cum_dist=cum_dist,
+        delta_dist=delta_dist,
+    )
