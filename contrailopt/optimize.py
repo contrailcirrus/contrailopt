@@ -24,6 +24,7 @@ from contrailopt.dag import (
     EdgeMetLookup,
     HorizontalDAG,
     Track,
+    prepare_static_graph,
     validate_flight_profile,
     validate_static_graph,
 )
@@ -344,7 +345,7 @@ class DAGState:
     best_mass: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival mass at each state
     best_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) arrival time in seconds from takeoff
     best_mach: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) incoming cruise mach
-    best_eef : npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) cruise EEF on incoming edge
+    best_eef: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) cruise EEF on incoming edge
     best_climb_dist: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb distance on incoming edge
     best_climb_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb time on incoming edge
     best_prev_h: npt.NDArray[np.int64]  # (n_h, n_fl) previous horizontal node, -1 = no predecessor
@@ -752,7 +753,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     state.best_climb_time[flat_nbr[wi], wj] = climb_time[wi, wj]
     state.best_prev_h[flat_nbr[wi], wj] = h_idxs[src_idx[wi]]
     state.best_prev_fi[flat_nbr[wi], wj] = fl_idxs[src_idx[wi]]
-    
+
     if ctx.met_lookup is not None and ctx.met_lookup.has_eef_per_m:
         state.best_eef[flat_nbr[wi], wj] = cruise_eef[wi, wj]
     else:
@@ -1713,40 +1714,6 @@ def _prepare_dag(
     return dag
 
 
-def _prepare_static_graph(
-    origin: AirportCoords,
-    dest: AirportCoords,
-    ds: xr.Dataset,
-    avoidance_regions: list[list[tuple[float, float]]] | None,
-    altitude_ft: npt.NDArray[np.floating],
-    takeoff_time: pd.Timestamp,
-    flight_hours: int,
-    **kwargs
-) -> tuple[HorizontalDAG, EdgeMetLookup]:
-    """Return the solver's DAG and static met lookup based on a global graph."""
-    dag = HorizontalDAG.from_static_graph(
-        ds,
-        origin,
-        dest,
-        dtype=FLOAT_DTYPE,
-        **kwargs
-    )
-
-    if avoidance_regions:
-        dag = dag.exclude_polygons(avoidance_regions)
-    dag = dag.prune_unreachable()
-
-    met_lookup = EdgeMetLookup.from_static_graph(
-        ds=ds,
-        dag=dag,
-        altitude_ft=altitude_ft,
-        takeoff_time=takeoff_time,
-        flight_hours=flight_hours,
-    )
-
-    return dag, met_lookup
-
-
 def _check_airport_agreement(
     dag: HorizontalDAG, origin: AirportCoords, dest: AirportCoords
 ) -> None:
@@ -1919,7 +1886,6 @@ class Optimizer:
 
         # Prepare DAG and meteorology from static graph if provided
         if static_graph is not None:
-
             static_graph = validate_static_graph(static_graph)
 
             if dollar_tonne_co2e and "eef_per_m" not in static_graph:
@@ -1939,7 +1905,7 @@ class Optimizer:
             flight_hours = flight_hours or estimate_flight_hours(
                 self.origin, self.dest, self.atyp.m_des
             )
-            dag, met_lookup = _prepare_static_graph(
+            dag, met_lookup = prepare_static_graph(
                 self.origin,
                 self.dest,
                 static_graph,
@@ -1947,7 +1913,8 @@ class Optimizer:
                 altitude_ft=self.fl_choices,
                 takeoff_time=self.takeoff_time,
                 flight_hours=flight_hours,
-                **kwargs
+                dtype=FLOAT_DTYPE,
+                **kwargs,
             )
             self.dag = dag
             self.met_lookup = met_lookup
@@ -1962,7 +1929,7 @@ class Optimizer:
                     "met must contain 'eef_per_m' or eef must be provided"
                     " when dollar_tonne_co2e is set"
                 )
-        
+
         self.dag = _prepare_dag(
             self.origin,
             self.dest,
@@ -1989,8 +1956,6 @@ class Optimizer:
             self.met_lookup = met_lookup
         else:
             self.met_lookup = None
-
-
 
     @classmethod
     def from_flight(
@@ -2473,7 +2438,7 @@ class Optimizer:
             h_dst,
             fi_src,
             fi_dst,
-            cum_dist
+            cum_dist,
         )
 
         out = np.empty(n_samp, dtype=_SEGMENT_DTYPE)
@@ -2582,7 +2547,7 @@ class Optimizer:
             h_dst,
             fi_src,
             fi_dst,
-            cum_dist
+            cum_dist,
         )
 
         # Interpolate met
@@ -2624,7 +2589,7 @@ class Optimizer:
         h_dst: int,
         fi_src: int,
         fi_dst: int,
-        cum_dist: npt.NDArray[np.floating]
+        cum_dist: npt.NDArray[np.floating],
     ) -> tuple[
         npt.NDArray[FLOAT_DTYPE],
         npt.NDArray[FLOAT_DTYPE],
@@ -2633,7 +2598,7 @@ class Optimizer:
         bool,
         bool,
         npt.NDArray[np.bool],
-        npt.NDArray[np.bool]
+        npt.NDArray[np.bool],
     ]:
         """Resample trajectory at specified cumulative distances along an edge."""
         state = self.result.state
@@ -2708,7 +2673,7 @@ class Optimizer:
             dag.lat[h_src],
             dag.lon[h_dst],
             dag.lat[h_dst],
-            cum_dist / edge_dist
+            cum_dist / edge_dist,
         )
 
         return (
@@ -2747,7 +2712,7 @@ class Optimizer:
                     path_fl_idx[k + 1],
                     path_mach[k + 1],
                     resample_m,
-                    skip_first=(k > 0)
+                    skip_first=(k > 0),
                 )
                 for k in range(len(path_h) - 1)
             ]
@@ -2759,7 +2724,7 @@ class Optimizer:
                 latitude=segments["latitude"],
                 altitude_ft=segments["altitude_ft"],
                 time=time,
-                aircraft_type=self.aircraft_type
+                aircraft_type=self.aircraft_type,
             )
 
         state = self.result.state
@@ -2993,7 +2958,6 @@ class Optimizer:
             pos = ax.get_position()
             cax = fig.add_axes([pos.x0 + 0.02, pos.y0 + 0.04, pos.width * 0.3, 0.015])
             fig.colorbar(tcf, cax=cax, orientation="horizontal", label="Tailwind (m/s)")
-
 
         fl = round(sel["altitude_ft"].item() / 100)
         title = f"FL{fl}" if sel_time is None else f"FL{fl} — {sel_time:%Y-%m-%d %H:%M UTC}"
