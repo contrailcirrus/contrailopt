@@ -342,8 +342,22 @@ class TestStaticGraphParity:
     ) -> None:
         """Test equivalence of dag generated from static graph."""
         origin, dest = route
-        dag = HorizontalDAG.from_static_graph(static_graph, origin, dest, max_dist_m=300_000.0)
-        assert dag == line_dag
+        opt = optimize.Optimizer(
+            origin_icao=origin,
+            dest_icao=dest,
+            aircraft_type="B737",
+            takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
+            static_graph=static_graph,
+        )
+        dag = opt.dag
+        assert dag.h_origin == line_dag.h_origin
+        assert dag.h_dest == line_dag.h_dest
+        np.testing.assert_array_equal(dag.lon, line_dag.lon.astype(optimize.FLOAT_DTYPE))
+        np.testing.assert_array_equal(dag.lat, line_dag.lat.astype(optimize.FLOAT_DTYPE))
+        np.testing.assert_array_equal(dag.adj_ptr, line_dag.adj_ptr)
+        np.testing.assert_array_equal(dag.adj, line_dag.adj)
+        # The optimizer computes edge_dist from float32 coordinates
+        np.testing.assert_allclose(dag.edge_dist, line_dag.edge_dist, rtol=1e-4)
 
     def test_reproduces_level_changes(
         self,
