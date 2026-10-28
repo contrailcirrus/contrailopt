@@ -247,8 +247,10 @@ def flight_profile_from_met(
     az = np.empty_like(lon)
     az[:-1] = np.deg2rad(geo.azimuth(lon[:-1], lat[:-1], lon[1:], lat[1:]))
     az[-1] = az[-2]
-    az = az.reshape((-1,1))
-    profile["tailwind"] = profile["eastward_wind"] * np.sin(az) + profile["northward_wind"] * np.cos(az)
+    az = az.reshape((-1, 1))
+    profile["tailwind"] = profile["eastward_wind"] * np.sin(az) + profile[
+        "northward_wind"
+    ] * np.cos(az)
     profile = profile.drop_vars(("eastward_wind", "northward_wind"))
 
     if eef is not None:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 
 import contrailopt
 
 project = "contrailopt"
-copyright = f"{datetime.datetime.now().year}, Contrails.org"
+copyright = f"{dt.datetime.now().year}, Contrails.org"
 author = "Contrails.org"
 version = contrailopt.__version__
 release = contrailopt.__version__

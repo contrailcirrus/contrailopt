@@ -485,13 +485,13 @@ class TestProfileFromMet:
         np.testing.assert_array_equal(prof["latitude"].values, lat)
         np.testing.assert_array_equal(prof["time"].values, time)
 
-        az =  np.deg2rad(geo.segment_azimuth(lon, lat))
+        az = np.deg2rad(geo.segment_azimuth(lon, lat))
         az[-1] = az[-2]
         az = np.tile(az.reshape(-1, 1), (1, prof.sizes["altitude_ft"]))
         np.testing.assert_allclose(
             prof["tailwind"].values,
             self.U_WIND * np.sin(az) + self.V_WIND * np.cos(az),
-            rtol=1e-5
+            rtol=1e-5,
         )
 
     @pytest.mark.parametrize("source", ["in_met", "separate_arg"])

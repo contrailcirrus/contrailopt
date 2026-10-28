@@ -123,17 +123,17 @@ def static_graph(route: tuple[AirportCoords, AirportCoords]) -> xr.Dataset:
 
     elon = 0.5 * (lon[tail] + lon[head])
     shape = (graph.sizes["edge"], graph.sizes["level"], graph.sizes["time"])
-    
+
     T_isa = units.m_to_T_isa(units.pl_to_m(level))
     air_temperature = np.broadcast_to(T_isa[np.newaxis, :, np.newaxis], shape)
     graph["air_temperature"] = (("edge", "level", "time"), air_temperature)
-    
+
     magnitude = 50.0  # m/s
     strip_sign = np.where(elon < -80.0, 1.0, -1.0)
     eastward_wind = np.zeros(shape, dtype=np.float32)
     eastward_wind[:, 1, :] = strip_sign[:, np.newaxis] * magnitude
     northward_wind = np.zeros(shape, dtype=np.float32)
-    
+
     az = np.deg2rad(geo.azimuth(lon[tail], lat[tail], lon[head], lat[head]))
     az = az[:, np.newaxis, np.newaxis]
     tailwind = eastward_wind * np.sin(az) + northward_wind * np.cos(az)
@@ -271,7 +271,7 @@ class TestStaticGraphValidation:
     def test_fixture_is_valid(
         self,
         route: tuple[AirportCoords, AirportCoords],
-        static_graph: xr.Dataset
+        static_graph: xr.Dataset,
     ) -> None:
         origin, dest = route
         opt = optimize.Optimizer(
@@ -283,7 +283,9 @@ class TestStaticGraphValidation:
         )
         assert opt.met_lookup is not None
 
-    @pytest.mark.parametrize("drop", ["lon", "lat", "tail", "head", "airport_node", "air_temperature", "tailwind"])
+    @pytest.mark.parametrize(
+        "drop", ["lon", "lat", "tail", "head", "airport_node", "air_temperature", "tailwind"]
+    )
     def test_missing_variable_raises(
         self,
         route: tuple[AirportCoords, AirportCoords],
@@ -301,19 +303,22 @@ class TestStaticGraphValidation:
                 static_graph=static_graph,
             )
 
-    @pytest.mark.parametrize(("dim", "var"), [
-        ("node", "lon"),
-        ("edge", "tail"),
-        ("icao", "airport_node"),
-        ("level", "air_temperature"),
-        ("time", "air_temperature"),
-    ])
+    @pytest.mark.parametrize(
+        ("dim", "var"),
+        [
+            ("node", "lon"),
+            ("edge", "tail"),
+            ("icao", "airport_node"),
+            ("level", "air_temperature"),
+            ("time", "air_temperature"),
+        ],
+    )
     def test_wrong_dimension_raises(
         self,
         route: tuple[AirportCoords, AirportCoords],
         static_graph: xr.Dataset,
         dim: str,
-        var: str
+        var: str,
     ) -> None:
         static_graph = static_graph.rename_dims({dim: "foo"})
         origin, dest = route
@@ -389,7 +394,7 @@ class TestStaticGraphParity:
             aircraft_type="B737",
             takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
             static_graph=static_graph,
-            cost_index=30.0
+            cost_index=30.0,
         )
         opt2.solve(n_iter=2, payload=15_000.0)
         _, p2, _ = opt2.reconstruct_path()
@@ -437,10 +442,10 @@ class TestStaticGraphParity:
             aircraft_type="B737",
             takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
             static_graph=static_graph,
-            cost_index=30.0
+            cost_index=30.0,
         )
         res2 = opt2.solve(n_iter=2, payload=15_000.0)
-        
+
         opt3 = optimize.Optimizer(
             origin_icao=origin,
             dest_icao=dest,
@@ -453,14 +458,14 @@ class TestStaticGraphParity:
             aggregate_met=True,
         )
         res3 = opt3.solve(n_iter=2, payload=15_000.0)
-        
+
         assert not opt1.met_lookup.is_aggregated
         assert opt2.met_lookup.is_aggregated
         assert opt3.met_lookup.is_aggregated
 
         assert abs(res1.trip_fuel - res2.trip_fuel) > 10.0
         assert abs(res1.trip_fuel - res2.trip_fuel) < 100.0
-        
+
         assert abs(res1.trip_fuel - res3.trip_fuel) > 10.0
         assert abs(res1.trip_fuel - res3.trip_fuel) < 100.0
 
@@ -635,7 +640,7 @@ class TestToFlight:
         route: tuple[AirportCoords, AirportCoords],
         line_dag: HorizontalDAG,
         met: MetDataset,
-        resample_m: float
+        resample_m: float,
     ) -> None:
         """to_flight returns a Flight with expected columns, endpoints, and segment lengths."""
         origin, dest = route
@@ -667,7 +672,8 @@ class TestToFlight:
 
         # Segment lengths match resampling rate
         dist = fl.segment_haversine()[:-1]
-        assert np.all(dist < 1.001 * resample_m)  # should be strictly smaller...
-                                                  # not sure why this isn't the case,
-                                                  # but we're close enough that I don't
-                                                  # think it's worth worrying about.
+        assert np.all(dist < 1.001 * resample_m)
+        # should be strictly smaller...
+        # not sure why this isn't the case,
+        # but we're close enough that I don't
+        # think it's worth worrying about.
