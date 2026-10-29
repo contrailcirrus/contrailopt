@@ -892,8 +892,8 @@ def validate_flight_profile(ds: xr.Dataset, n_nodes: int) -> xr.Dataset:
     return xr.Dataset(data_vars, coords={"altitude_ft": ds["altitude_ft"].values})
 
 
-def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
-    """Validate a static graph for the 4D solver.
+def validate_global_graph(ds: xr.Dataset) -> xr.Dataset:
+    """Validate a global graph for the 4D solver.
 
     Returns a dataset carrying met variables under their original names
     (``air_temperature``, ``tailwind``, and optional ``eef_per_m``)
@@ -902,19 +902,19 @@ def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
     expected: tuple[str, ...] = ("node",)
     for required in ("lon", "lat"):
         if required not in ds:
-            raise ValueError(f"Static graph missing required variable '{required}'")
+            raise ValueError(f"Global graph missing required variable '{required}'")
         if ds[required].dims != expected:
             raise ValueError(f"Variable '{required}' does not have expected dimensions {expected}")
 
     expected = ("edge",)
     for required in ("tail", "head"):
         if required not in ds:
-            raise ValueError(f"Static graph missing required variable '{required}'")
+            raise ValueError(f"Global graph missing required variable '{required}'")
         if ds[required].dims != expected:
             raise ValueError(f"Variable '{required}' does not have expected dimensions {expected}")
 
     if "airport_node" not in ds:
-        raise ValueError("Static graph missing required variable 'airport_node'")
+        raise ValueError("Global graph missing required variable 'airport_node'")
     if ds["airport_node"].dims != ("icao",):
         raise ValueError("Variable 'airport_node' does not have expected dimensions ('icao',)")
 
@@ -924,7 +924,7 @@ def validate_static_graph(ds: xr.Dataset) -> xr.Dataset:
         variables += ("eef_per_m",)
     for required in variables:
         if required not in ds:
-            raise ValueError(f"Static graph missing required variable '{required}'")
+            raise ValueError(f"Global graph missing required variable '{required}'")
         try:
             ds[required] = ds[required].transpose(*expected).astype(np.float32)
         except ValueError as e:
@@ -1395,7 +1395,7 @@ def _dual_az_edges(
     return edges, edge_dist
 
 
-def prepare_static_graph(
+def prepare_global_graph(
     origin: AirportCoords,
     dest: AirportCoords,
     ds: xr.Dataset,
@@ -1406,7 +1406,7 @@ def prepare_static_graph(
     dtype: type[np.floating] = np.float64,
     max_angle_deg: float = 40.0,
 ) -> tuple[HorizontalDAG, EdgeMetLookup]:
-    """Return the solver's DAG and static met lookup based on a global graph."""
+    """Return the solver's DAG and met lookup based on a global graph."""
     # Load the core graph variables once up front
     # For Zarr-backed data, the .load occurs concurrently for all variables,
     # and provides a speedup for downstream logic
@@ -1417,11 +1417,11 @@ def prepare_static_graph(
         raise ValueError("Variable 'airport_node' contains some values not in coordinate 'node'")
 
     if (icao := origin.icao_code) not in ds["icao"]:
-        msg = f"Origin {icao} is not included in static graph."
+        msg = f"Origin {icao} is not included in global graph."
         raise ValueError(msg)
 
     if (icao := dest.icao_code) not in ds["icao"]:
-        msg = f"Destination {icao} is not included in static graph."
+        msg = f"Destination {icao} is not included in global graph."
         raise ValueError(msg)
 
     lon = ds["lon"].values.astype(dtype)
@@ -1429,7 +1429,7 @@ def prepare_static_graph(
     h_origin = ds["airport_node"].sel(icao=origin.icao_code).item()
     h_dest = ds["airport_node"].sel(icao=dest.icao_code).item()
 
-    ds_edge, reversed_, src, dst = _select_static_edges(
+    ds_edge, reversed_, src, dst = _select_global_edges(
         lon,
         lat,
         ds["tail"].values,
@@ -1440,13 +1440,13 @@ def prepare_static_graph(
         avoidance_regions,
     )
     dag = _dag_from_edges(lon, lat, src, dst, h_origin, h_dest)
-    met_lookup = _static_met_lookup(
+    met_lookup = _global_met_lookup(
         ds, dag, ds_edge, reversed_, altitude_ft, takeoff_time, flight_hours
     )
     return dag, met_lookup
 
 
-def _select_static_edges(
+def _select_global_edges(
     lon: npt.NDArray[np.floating],
     lat: npt.NDArray[np.floating],
     tail: npt.NDArray[np.int64],
@@ -1461,7 +1461,7 @@ def _select_static_edges(
     npt.NDArray[np.int64],
     npt.NDArray[np.int64],
 ]:
-    """Select the static graph edges for one origin-destination pair, sorted by source node.
+    """Select the global graph edges for one origin-destination pair, sorted by source node.
 
     ``lon`` and ``lat`` have shape ``(n,)``. ``tail`` and ``head`` have shape ``(m,)``
     and hold node indices into ``lon`` and ``lat``.
@@ -1542,7 +1542,7 @@ def _dag_from_edges(
     )
 
 
-def _static_met_lookup(
+def _global_met_lookup(
     ds: xr.Dataset,
     dag: HorizontalDAG,
     ds_edge: npt.NDArray[np.int64],
@@ -1551,12 +1551,12 @@ def _static_met_lookup(
     takeoff_time: pd.Timestamp,
     flight_hours: int,
 ) -> EdgeMetLookup:
-    """Read the met for each DAG edge from the static graph ``ds``.
+    """Read the met for each DAG edge from the global graph ``ds``.
 
     DAG edge ``i`` is edge ``ds_edge[i]`` of ``ds``. Where ``reversed_[i]`` is True, the DAG
     traverses that edge ``head -> tail`` and its tailwind is negated.
     """
-    # Static graph is used to generate aggregated met lookup with two samples per edge
+    # Global graph is used to generate aggregated met lookup with two samples per edge
     # TODO: are two samples necessary?
     # If / when we refactor to require aggregated met, we can remove edge sample points
     # Each edge has one sample at its source (cum_dist 0) and one at its destination
@@ -1599,7 +1599,7 @@ def _static_met_lookup(
     # Raise on NaN in any variables - downstream computations would be poisoned.
     for var in variables:
         if met[var].isnull().any():
-            msg = f"NaN values found in '{var}' after constructing lookup from static graph."
+            msg = f"NaN values found in '{var}' after constructing lookup from global graph."
             raise ValueError(msg)
 
     return EdgeMetLookup(

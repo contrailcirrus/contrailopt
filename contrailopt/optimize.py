@@ -24,9 +24,9 @@ from contrailopt.dag import (
     EdgeMetLookup,
     HorizontalDAG,
     Track,
-    prepare_static_graph,
+    prepare_global_graph,
     validate_flight_profile,
-    validate_static_graph,
+    validate_global_graph,
 )
 from contrailopt.grid_utils import flight_profile_from_met
 
@@ -1754,8 +1754,8 @@ class Optimizer:
         Aircraft type key in the PS model parameter table (e.g. ``"A320"``).
     takeoff_time : pd.Timestamp
         Departure time, used for met interpolation.
-    static_graph : xr.Dataset or None, default None
-        Static graph with "air_temperature", "tailwind", and (optionally) "eef_per_m"
+    global_graph : xr.Dataset or None, default None
+        Global graph with "air_temperature", "tailwind", and (optionally) "eef_per_m"
         pre-interpolated onto edges. Takes precedence over "met", "eef", and "dag" if any
         are provided.
         Graph nodes are defined by "lon" and "lat" variables with coordinate "node".
@@ -1763,7 +1763,7 @@ class Optimizer:
         airport ICAO codes and values that map to node coordinates.
         Graph edges are defined by "tail" and "head" variables with coordinate "edge" and
         values that map to coordinates of start and end nodes. Edges are treated as undirected, so
-        directed acyclic graphs generated from static graphs can include edges from "tail" nodes
+        directed acyclic graphs generated from global graphs can include edges from "tail" nodes
         to "head" nodes and from "head" nodes to "tail" nodes.
         "air_temperature", "tailwind", and "eef_per_m" are provided as variables with "edge",
         "level", and "time" coordinates (dimension ("edge", "level", "time")). Tailwind values
@@ -1831,7 +1831,7 @@ class Optimizer:
         aircraft_type: str,
         takeoff_time: pd.Timestamp,
         *,
-        static_graph: xr.Dataset | None = None,
+        global_graph: xr.Dataset | None = None,
         met: MetDataset | xr.Dataset | None = None,
         eef: xr.DataArray | MetDataArray | None = None,
         dag: HorizontalDAG | Track | None = None,
@@ -1883,31 +1883,31 @@ class Optimizer:
 
         self.result: DAGResult | None = None
 
-        # Prepare DAG and meteorology from static graph if provided
-        if static_graph is not None:
-            static_graph = validate_static_graph(static_graph)
+        # Prepare DAG and meteorology from global graph if provided
+        if global_graph is not None:
+            global_graph = validate_global_graph(global_graph)
 
-            if dollar_tonne_co2e and "eef_per_m" not in static_graph:
-                msg = "static_graph must contain eef_per_m when dollar_tonne_co2e is set"
+            if dollar_tonne_co2e and "eef_per_m" not in global_graph:
+                msg = "global_graph must contain eef_per_m when dollar_tonne_co2e is set"
                 raise ValueError(msg)
 
             if met is not None:
-                msg = "met is not used when static_graph is provided."
+                msg = "met is not used when global_graph is provided."
                 warnings.warn(msg, stacklevel=2)
             if eef is not None:
-                msg = "eef is not used when static_graph is provided."
+                msg = "eef is not used when global_graph is provided."
                 warnings.warn(msg, stacklevel=2)
             if dag is not None:
-                msg = "dag is not used when static_graph is provided."
+                msg = "dag is not used when global_graph is provided."
                 warnings.warn(msg, stacklevel=2)
 
             flight_hours = flight_hours or estimate_flight_hours(
                 self.origin, self.dest, self.atyp.m_des
             )
-            dag, met_lookup = prepare_static_graph(
+            dag, met_lookup = prepare_global_graph(
                 self.origin,
                 self.dest,
-                static_graph,
+                global_graph,
                 avoidance_regions=self.avoidance_regions,
                 altitude_ft=self.fl_choices,
                 takeoff_time=self.takeoff_time,

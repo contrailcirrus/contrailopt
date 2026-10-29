@@ -87,8 +87,8 @@ def met() -> MetDataset:
 
 
 @pytest.fixture
-def static_graph(route: tuple[AirportCoords, AirportCoords]) -> xr.Dataset:
-    """Build a static graph similar to ``line_dag`` with ``met``."""
+def global_graph(route: tuple[AirportCoords, AirportCoords]) -> xr.Dataset:
+    """Build a global graph similar to ``line_dag`` with ``met``."""
     origin, dest = route
     n = 20
     lon = np.linspace(origin.longitude, dest.longitude, n)
@@ -265,13 +265,13 @@ class TestStepPenalty:
         assert np.count_nonzero(np.diff(opt.reconstruct_path()[1][1:-1])) == 0
 
 
-class TestStaticGraphValidation:
-    """Test static graph validation."""
+class TestGlobalGraphValidation:
+    """Test global graph validation."""
 
     def test_fixture_is_valid(
         self,
         route: tuple[AirportCoords, AirportCoords],
-        static_graph: xr.Dataset,
+        global_graph: xr.Dataset,
     ) -> None:
         origin, dest = route
         opt = optimize.Optimizer(
@@ -279,7 +279,7 @@ class TestStaticGraphValidation:
             dest_icao=dest,
             aircraft_type="B737",
             takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
-            static_graph=static_graph,
+            global_graph=global_graph,
         )
         assert opt.met_lookup is not None
 
@@ -289,18 +289,18 @@ class TestStaticGraphValidation:
     def test_missing_variable_raises(
         self,
         route: tuple[AirportCoords, AirportCoords],
-        static_graph: xr.Dataset,
+        global_graph: xr.Dataset,
         drop: str,
     ) -> None:
-        static_graph = static_graph.drop_vars(drop)
+        global_graph = global_graph.drop_vars(drop)
         origin, dest = route
-        with pytest.raises(ValueError, match="Static graph missing required variable"):
+        with pytest.raises(ValueError, match="Global graph missing required variable"):
             optimize.Optimizer(
                 origin_icao=origin,
                 dest_icao=dest,
                 aircraft_type="B737",
                 takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
-                static_graph=static_graph,
+                global_graph=global_graph,
             )
 
     @pytest.mark.parametrize(
@@ -316,11 +316,11 @@ class TestStaticGraphValidation:
     def test_wrong_dimension_raises(
         self,
         route: tuple[AirportCoords, AirportCoords],
-        static_graph: xr.Dataset,
+        global_graph: xr.Dataset,
         dim: str,
         var: str,
     ) -> None:
-        static_graph = static_graph.rename_dims({dim: "foo"})
+        global_graph = global_graph.rename_dims({dim: "foo"})
         origin, dest = route
         if var != "air_temperature":
             match = f"Variable '{var}' does not have"
@@ -332,27 +332,27 @@ class TestStaticGraphValidation:
                 dest_icao=dest,
                 aircraft_type="B737",
                 takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
-                static_graph=static_graph,
+                global_graph=global_graph,
             )
 
 
-class TestStaticGraphParity:
-    """Test parity between results with and without static graph."""
+class TestGlobalGraphParity:
+    """Test parity between results with and without global graph."""
 
     def test_equivalent_dag(
         self,
         route: tuple[AirportCoords, AirportCoords],
         line_dag: HorizontalDAG,
-        static_graph: xr.Dataset,
+        global_graph: xr.Dataset,
     ) -> None:
-        """Test equivalence of dag generated from static graph."""
+        """Test equivalence of dag generated from global graph."""
         origin, dest = route
         opt = optimize.Optimizer(
             origin_icao=origin,
             dest_icao=dest,
             aircraft_type="B737",
             takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
-            static_graph=static_graph,
+            global_graph=global_graph,
         )
         dag = opt.dag
         assert dag.h_origin == line_dag.h_origin
@@ -370,7 +370,7 @@ class TestStaticGraphParity:
         fl_choices: np.ndarray,
         line_dag: HorizontalDAG,
         met: MetDataset,
-        static_graph: xr.Dataset,
+        global_graph: xr.Dataset,
     ) -> None:
         """Test parity with level changes from met-aware optimizer."""
         origin, dest = route
@@ -393,7 +393,7 @@ class TestStaticGraphParity:
             dest_icao=dest,
             aircraft_type="B737",
             takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
-            static_graph=static_graph,
+            global_graph=global_graph,
             cost_index=30.0,
         )
         opt2.solve(n_iter=2, payload=15_000.0)
@@ -415,7 +415,7 @@ class TestStaticGraphParity:
         route: tuple[AirportCoords, AirportCoords],
         line_dag: HorizontalDAG,
         met: MetDataset,
-        static_graph: xr.Dataset,
+        global_graph: xr.Dataset,
     ) -> None:
         """Test for reasonable differences in fuel burn.
 
@@ -441,7 +441,7 @@ class TestStaticGraphParity:
             dest_icao=dest,
             aircraft_type="B737",
             takeoff_time=pd.Timestamp("2024-01-01T01:00:00"),
-            static_graph=static_graph,
+            global_graph=global_graph,
             cost_index=30.0,
         )
         res2 = opt2.solve(n_iter=2, payload=15_000.0)
