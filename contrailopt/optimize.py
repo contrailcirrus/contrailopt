@@ -2915,6 +2915,8 @@ class Optimizer:
             # One sample index per node (first sample of each node's first outgoing edge)
             has_edges = self.dag.out_degree > 0
             node_sample_idx = self.met_lookup.edge_ptr[self.dag.adj_ptr[:-1][has_edges]]
+            if self.met_lookup.is_aggregated:
+                node_sample_idx = self.met_lookup.edge_idx[node_sample_idx]
             node_lon = self.dag.lon[has_edges]
             node_lat = self.dag.lat[has_edges]
             tailwind = sel.tailwind.values[node_sample_idx]
