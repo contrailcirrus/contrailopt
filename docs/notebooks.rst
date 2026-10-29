@@ -8,3 +8,4 @@ Notebooks
    notebooks/optimize-2d
    notebooks/optimize-4d
    notebooks/algorithm
+   notebooks/global-graph
