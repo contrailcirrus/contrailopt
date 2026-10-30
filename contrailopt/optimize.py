@@ -356,6 +356,7 @@ class DAGState:
     best_eef: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) cruise EEF on incoming edge
     best_climb_dist: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb distance on incoming edge
     best_climb_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) climb time on incoming edge
+    best_descent_time: npt.NDArray[FLOAT_DTYPE]  # (n_h, n_fl) final descent time, used by to_flight
     best_prev_h: npt.NDArray[np.int64]  # (n_h, n_fl) previous horizontal node, -1 = no predecessor
     best_prev_fi: npt.NDArray[np.int64]  # (n_h, n_fl) previous fl index, -1 = came from origin
 
@@ -370,6 +371,7 @@ class DAGState:
             best_eef=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_climb_dist=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_climb_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
+            best_descent_time=np.full((n_h, n_cols), np.nan, dtype=FLOAT_DTYPE),
             best_prev_h=np.full((n_h, n_cols), -1, dtype=np.int64),
             best_prev_fi=np.full((n_h, n_cols), -1, dtype=np.int64),
         )
@@ -558,6 +560,53 @@ def _compute_edge_climbs(
     return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible
 
 
+def _compute_descents_to_lowest_fl(
+    met_lookup: EdgeMetLookup,
+    dest_edges: npt.NDArray[np.int64],
+    flat_edge_idx: npt.NDArray[np.int64],
+    src_idx: npt.NDArray[np.int64],
+    src_elapsed: npt.NDArray[FLOAT_DTYPE],
+    climb_time: npt.NDArray[FLOAT_DTYPE],
+    fl_choices: npt.NDArray[FLOAT_DTYPE],
+    mach_choices: npt.NDArray[FLOAT_DTYPE],
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    takeoff_time: pd.Timestamp,
+) -> tuple[npt.NDArray[FLOAT_DTYPE], npt.NDArray[FLOAT_DTYPE]]:
+    """Compute the final descent from each candidate FL down to the lowest FL with met.
+
+    Met is taken at the last sample of each edge into the destination, at each candidate FL,
+    at the estimated time the aircraft reaches it. ``dest_edges`` holds the positions of those
+    edges in the flat edge arrays.
+
+    Returns fuel and time, each with shape ``(n_dest, n_fl)``.
+    """
+    end_sample = met_lookup.edge_ptr[flat_edge_idx[dest_edges] + 1] - 1
+    end_dt = _estimate_sample_times(
+        met_lookup,
+        end_sample,
+        dest_edges,
+        src_idx,
+        takeoff_time,
+        src_elapsed,
+        climb_time,
+        fl_choices,
+        mach_choices,
+    )
+    end_met = met_lookup(end_sample, end_dt)
+
+    isa_T = units.m_to_T_isa(units.ft_to_m(fl_choices))  # (n_fl,)
+    delta_isa = end_met.air_temperature - isa_T  # (n_dest, n_fl)
+
+    _, descent_fuel, descent_time = ps.compute_descent_segment(
+        fl_choices[np.newaxis, :],
+        fl_choices[0],
+        atyp,
+        delta_isa,
+        end_met.tailwind,
+    )
+    return descent_fuel, descent_time
+
+
 def _isa_cruise(
     fl_choices: npt.NDArray[FLOAT_DTYPE],
     mach_choices: npt.NDArray[FLOAT_DTYPE],
@@ -654,13 +703,31 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
 
     climb_cost = ctx.cost_index / 60.0 * climb_time + climb_fuel
 
-    # Descent: ground descent if neighbor is destination.
+    # Descent: ground descent if neighbor is destination, on a fixed 3 degree profile. Below the
+    # lowest FL it uses ISA and zero wind; above it, met at the candidate FL when available.
     # FL-to-FL step-downs are treated as part of cruise (mild thrust reduction at cruise Mach,
     # negligible extra distance or time vs. level flight).
     is_dest = (flat_nbr == ctx.dag.h_dest)[:, np.newaxis]
     descent_dd = is_dest * ctx.final_descent_dist
     descent_dt = is_dest * ctx.final_descent_time
     descent_df = is_dest * ctx.final_descent_fuel
+
+    dest_edges = np.flatnonzero(is_dest[:, 0])
+    if ctx.met_lookup is not None and dest_edges.size:
+        upper_fuel, upper_time = _compute_descents_to_lowest_fl(
+            ctx.met_lookup,
+            dest_edges,
+            flat_edge_idx,
+            src_idx,
+            src_elapsed,
+            climb_time,
+            fl_choices,
+            mach_choices,
+            ctx.atyp,
+            ctx.takeoff_time,
+        )
+        descent_df[dest_edges] = ctx.final_descent_fuel[0] + upper_fuel
+        descent_dt[dest_edges] = ctx.final_descent_time[0] + upper_time
 
     # Ground distance of the final descent below the lowest FL. The fixed descent profile
     # covers the same distance below the lowest FL whatever FL it starts from.
@@ -761,6 +828,7 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     state.best_mach[flat_nbr[wi], wj] = best_mach[wi, wj]
     state.best_climb_dist[flat_nbr[wi], wj] = climb_dist[wi, wj]
     state.best_climb_time[flat_nbr[wi], wj] = climb_time[wi, wj]
+    state.best_descent_time[flat_nbr[wi], wj] = descent_dt[wi, wj]
     state.best_prev_h[flat_nbr[wi], wj] = h_idxs[src_idx[wi]]
     state.best_prev_fi[flat_nbr[wi], wj] = fl_idxs[src_idx[wi]]
 
@@ -836,6 +904,7 @@ def solve_dag(
         state.best_mach[h_dest, ground_fi] = state.best_mach[h_dest, best_dest_fi]
         state.best_climb_dist[h_dest, ground_fi] = state.best_climb_dist[h_dest, best_dest_fi]
         state.best_climb_time[h_dest, ground_fi] = state.best_climb_time[h_dest, best_dest_fi]
+        state.best_descent_time[h_dest, ground_fi] = state.best_descent_time[h_dest, best_dest_fi]
         state.best_prev_h[h_dest, ground_fi] = state.best_prev_h[h_dest, best_dest_fi]
         state.best_prev_fi[h_dest, ground_fi] = state.best_prev_fi[h_dest, best_dest_fi]
 
@@ -2630,15 +2699,15 @@ class Optimizer:
         climb_time_s = state.best_climb_time[h_dst, cruise_fi]
         src_alt = self.origin.elevation_ft if is_first else self.fl_choices[fi_src]
 
-        # Descent (final edge only)
+        # Descent (final edge only): distance from the fixed profile, time from the solver state
         if is_last:
-            fd_d, _, fd_t = ps.final_descent(
+            fd_d, _, _ = ps.final_descent(
                 np.array([cruise_fl], dtype=FLOAT_DTYPE),
                 self.dest.elevation_ft,
                 self.atyp,
             )
             descent_dist = fd_d[0].item()
-            descent_time = fd_t[0].item()
+            descent_time = state.best_descent_time[h_dst, cruise_fi].item()
             dest_alt = self.dest.elevation_ft
         else:
             descent_dist = 0.0
