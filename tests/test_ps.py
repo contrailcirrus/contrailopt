@@ -10,6 +10,7 @@ from contrailopt.ps import (
     climb_performance,
     climb_to_target,
     compute_climb_segment,
+    compute_descent_segment,
     cruise_performance,
     final_descent,
 )
@@ -271,6 +272,30 @@ class TestFinalDescent:
         dist_1000, _, _ = final_descent(src_alt_ft, 1000.0, atyp)
         # 500 ft ground alt should interpolate between 0 and 1000
         assert dist_1000[0] < dist_500[0] < dist_0[0]
+
+
+class TestComputeDescentSegment:
+    def test_no_met_splits_final_descent(self, atyp: PSParams) -> None:
+        """Without met, a descent to FL280 plus the final descent from FL280 is one descent."""
+        upper = compute_descent_segment(np.array([35000.0]), 28000.0, atyp, 0.0, 0.0)
+        lower = final_descent(np.array([28000.0]), 0.0, atyp)
+        whole = final_descent(np.array([35000.0]), 0.0, atyp)
+        for u, lo, w in zip(upper, lower, whole, strict=True):
+            assert u[0] + lo[0] == pytest.approx(w[0], rel=1e-5)
+
+    def test_no_descent(self, atyp: PSParams) -> None:
+        dist, fuel, time = compute_descent_segment(np.array([30000.0]), 30000.0, atyp, 0.0, 0.0)
+        assert dist[0] == 0.0
+        assert fuel[0] == 0.0
+        assert time[0] == 0.0
+
+    def test_tailwind_changes_time_not_distance(self, atyp: PSParams) -> None:
+        src_alt_ft = np.array([35000.0])
+        tailwind = np.array([[-30.0], [0.0], [30.0]])
+        dist, fuel, time = compute_descent_segment(src_alt_ft, 28000.0, atyp, 0.0, tailwind)
+        assert dist[0, 0] == dist[1, 0] == dist[2, 0]
+        assert time[0, 0] > time[1, 0] > time[2, 0]
+        assert fuel[0, 0] > fuel[1, 0] > fuel[2, 0]
 
 
 @pytest.mark.parametrize(
