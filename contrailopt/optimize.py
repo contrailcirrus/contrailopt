@@ -196,7 +196,8 @@ def _calculate_cruise_at_samples(
     climb_dist: npt.NDArray[FLOAT_DTYPE],
     descent_dd: npt.NDArray[FLOAT_DTYPE],
     flat_dist: npt.NDArray[FLOAT_DTYPE],
-    src_alt_ft: npt.NDArray[FLOAT_DTYPE],
+    low_climb_dist: npt.NDArray[FLOAT_DTYPE],
+    low_descent_dist: npt.NDArray[FLOAT_DTYPE],
 ) -> tuple[
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
@@ -212,9 +213,12 @@ def _calculate_cruise_at_samples(
     climb portion so that only the candidate level flight segment contributes to fuel and time. For
     step-descents, climb_dist is zero, so the full edge is treated as cruise at the candidate FL.
 
-    The EEF term (``eef_per_m * delta_dist``) is accumulated over the full
+    The EEF term (``eef_per_m * delta_dist``) is accumulated at the candidate FL over the full
     edge without cruise-zone weighting because we want contrail forcing to apply
     regardless of whether the aircraft is cruising or climbing/descending along the edge.
+    The only exception is the distance flown below the lowest candidate FL during the initial
+    climb (``low_climb_dist``) and the final descent (``low_descent_dist``), which accumulates
+    no EEF.
 
     Parameters
     ----------
@@ -244,9 +248,12 @@ def _calculate_cruise_at_samples(
         Descent distance deducted from edge length. Shape ``(n_edge, n_fl)``.
     flat_dist : npt.NDArray[FLOAT_DTYPE]
         Total edge distance. Shape ``(n_edge,)``.
-    src_alt_ft : npt.NDArray[FLOAT_DTYPE]
-        Altitude at which each edge starts (the source FL, or the airport elevation
-        for edges leaving the origin). Shape ``(n_edge,)``.
+    low_climb_dist : npt.NDArray[FLOAT_DTYPE]
+        Ground distance at the start of each edge flown below the lowest candidate FL during
+        the initial climb; zero for edges not leaving the origin. Shape ``(n_edge, 1)``.
+    low_descent_dist : npt.NDArray[FLOAT_DTYPE]
+        Ground distance at the end of each edge flown below the lowest candidate FL during
+        the final descent; zero for edges not entering the destination. Shape ``(n_edge, 1)``.
 
     Returns
     -------
@@ -319,17 +326,18 @@ def _calculate_cruise_at_samples(
     cruise_fuel = np.add.reduceat(seg_fuel, edge_bounds, axis=0)
     cruise_feasible = np.add.reduceat(~feas, edge_bounds, axis=0) == 0
 
-    # Accumulate eef_per_m over the full edge (no cruise zone weighting)
+    # Accumulate eef_per_m at the candidate FL over the full edge (no cruise zone weighting),
+    # except where the aircraft is below the lowest candidate FL
     if sample_met.eef_per_m is not None:
-        sample_fi = _climbing_fl_idxs(
-            met_lookup.cum_dist[sample_idxs][:, np.newaxis],
-            climb_dist[sample_to_edge],
-            src_alt_ft[sample_to_edge][:, np.newaxis],
-            fl_choices[np.newaxis, :],
-            fl_choices,
+        eef_weight = _cruise_zone_weights(
+            met_lookup,
+            sample_idxs,
+            sample_to_edge,
+            low_climb_dist,
+            low_descent_dist,
+            flat_dist,
         )
-        eef_per_m = np.take_along_axis(sample_met.eef_per_m, sample_fi, axis=1)
-        seg_eef = eef_per_m * seg_dist[:, np.newaxis]
+        seg_eef = sample_met.eef_per_m * seg_dist[:, np.newaxis] * eef_weight
         cruise_eef = np.add.reduceat(seg_eef, edge_bounds, axis=0)
     else:
         cruise_eef = np.zeros((1, 1), dtype=FLOAT_DTYPE)
@@ -413,6 +421,7 @@ def _compute_ground_climbs(
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[FLOAT_DTYPE],
     npt.NDArray[np.bool_],
+    npt.NDArray[FLOAT_DTYPE],
 ]:
     """Compute climb from the ground to each candidate FL.
 
@@ -424,13 +433,15 @@ def _compute_ground_climbs(
     Parameters
     ----------
     delta_isa : npt.NDArray[FLOAT_DTYPE]
-        Temperature offset from ISA at base_alt. Shape ``(n_edge, 1)``.
+        Temperature offset from ISA at each candidate FL. Shape ``(n_edge, n_fl)``.
     tailwind : npt.NDArray[FLOAT_DTYPE]
-        Along-track tailwind component in m/s. Shape ``(n_edge, 1)``.
+        Along-track tailwind component in m/s at each candidate FL. Shape ``(n_edge, n_fl)``.
 
     Returns
     -------
-    Five arrays each of shape ``(n_edge, n_fl)``.
+    Five arrays each of shape ``(n_edge, n_fl)`` (climb distance, fuel, time, post-climb mass,
+    and feasibility), followed by ``low_climb_dist``, the ground distance in meters of the
+    low-altitude phase, with shape ``(n_edge, 1)``.
     """
     base_alt = fl_choices[0]
     init_dist, init_fuel, init_time, base_mass = ps.climb_to_target(
@@ -451,8 +462,9 @@ def _compute_ground_climbs(
     climb_dist = init_dist + next_dist
     climb_fuel = init_fuel + next_fuel
     climb_time = init_time + next_time
+    low_climb_dist = np.full_like(climb_dist[:, :1], init_dist)
 
-    return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible
+    return climb_dist, climb_fuel, climb_time, post_climb_mass, feasible, low_climb_dist
 
 
 def _compute_edge_climbs(
@@ -474,11 +486,10 @@ def _compute_edge_climbs(
 ]:
     """Compute start-of-edge FL-to-FL step climbs with met-based corrections.
 
-    The delta between met and ISA temperature at the source node is computed
-    once and added as a constant offset at every altitude step during the climb.
-    Tailwind is computed from wind at the source node in the direction of the edge
-    azimuth and converts true air distance to ground distance inside
-    ``compute_climb_segment``.
+    Met is taken at the start of the edge at each candidate (target) FL. The difference
+    between met and ISA temperature at the candidate FL is added as a constant offset at
+    every altitude step during the climb. The tailwind at the candidate FL converts true air
+    distance to ground distance via ``compute_climb_segment``.
 
     Parameters
     ----------
@@ -526,12 +537,9 @@ def _compute_edge_climbs(
         climb_dt = np.broadcast_to(src_dt[:, np.newaxis], (len(src_idx), n_fl))
         climb_met = met_lookup(edge_start, climb_dt)
 
-        edge_arange = np.arange(len(src_idx))
-        met_T = climb_met.air_temperature[edge_arange, edge_src_fi]
-        isa_T = units.m_to_T_isa(units.ft_to_m(edge_src_fl))
-        delta_isa = (met_T - isa_T)[:, np.newaxis]
-
-        tailwind = climb_met.tailwind
+        isa_T = units.m_to_T_isa(units.ft_to_m(fl_choices))  # (n_fl,)
+        delta_isa = climb_met.air_temperature - isa_T  # (n_edge, n_fl)
+        tailwind = climb_met.tailwind  # (n_edge, n_fl)
     else:
         delta_isa = 0.0
         tailwind = 0.0
@@ -611,24 +619,23 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             src_time = np.broadcast_to(np.datetime64(ctx.takeoff_time), (n_edge, len(fl_choices)))
             climb_met = ctx.met_lookup(edge_start, src_time)
 
-            # Use lowest FL index for temperature/wind (closest to base_alt)
-            met_T = climb_met.air_temperature[:, 0]
-            base_alt = fl_choices[0]
-            isa_T = units.m_to_T_isa(units.ft_to_m(base_alt))
-            delta_isa = (met_T - isa_T)[:, np.newaxis]
-
-            tailwind = climb_met.tailwind
+            # Above the lowest FL, use temperature/wind at each candidate FL
+            isa_T = units.m_to_T_isa(units.ft_to_m(fl_choices))  # (n_fl,)
+            delta_isa = climb_met.air_temperature - isa_T  # (n_edge, n_fl)
+            tailwind = climb_met.tailwind  # (n_edge, n_fl)
         else:
             delta_isa = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
             tailwind = np.zeros((n_edge, 1), dtype=FLOAT_DTYPE)
 
-        climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_ground_climbs(
-            fl_choices,
-            src_masses[0],
-            ctx.atyp,
-            ctx.origin_elev_ft,
-            delta_isa,
-            tailwind,
+        climb_dist, climb_fuel, climb_time, post_climb_mass, feasible, low_climb_dist = (
+            _compute_ground_climbs(
+                fl_choices,
+                src_masses[0],
+                ctx.atyp,
+                ctx.origin_elev_ft,
+                delta_isa,
+                tailwind,
+            )
         )
     else:
         climb_dist, climb_fuel, climb_time, post_climb_mass, feasible = _compute_edge_climbs(
@@ -642,12 +649,10 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             ctx.takeoff_time,
             ctx.met_lookup,
         )
+        # Only edges leaving the origin climb from below the lowest FL
+        low_climb_dist = np.zeros((len(src_idx), 1), dtype=FLOAT_DTYPE)
 
     climb_cost = ctx.cost_index / 60.0 * climb_time + climb_fuel
-
-    # The ground slot sits one past the FLs, so append the airport elevation to index it
-    alt_by_fi = np.append(fl_choices, ctx.origin_elev_ft).astype(FLOAT_DTYPE)
-    src_alt_ft = alt_by_fi[fl_idxs[src_idx]]
 
     # Descent: ground descent if neighbor is destination.
     # FL-to-FL step-downs are treated as part of cruise (mild thrust reduction at cruise Mach,
@@ -656,6 +661,10 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
     descent_dd = is_dest * ctx.final_descent_dist
     descent_dt = is_dest * ctx.final_descent_time
     descent_df = is_dest * ctx.final_descent_fuel
+
+    # Ground distance of the final descent below the lowest FL. The fixed descent profile
+    # covers the same distance below the lowest FL whatever FL it starts from.
+    low_descent_dist = is_dest * ctx.final_descent_dist[0]
 
     # Cruise fuel/time: (n_edge, n_fl, n_mach)
     cruise_dist = flat_dist[:, np.newaxis] - climb_dist - descent_dd
@@ -674,7 +683,8 @@ def _relax_wavefront(wave: npt.NDArray[np.int64], ctx: _SolverCtx, state: DAGSta
             climb_dist,
             descent_dd,
             flat_dist,
-            src_alt_ft,
+            low_climb_dist,
+            low_descent_dist,
         )
     else:
         cruise_fuel, cruise_time, cruise_feasible = _isa_cruise(
