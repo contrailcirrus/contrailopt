@@ -252,7 +252,7 @@ class TestComputeGroundClimbs:
         """Origin wavefront returns correct shapes and dtypes."""
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
 
-        dist, fuel, time, mass, feasible = _compute_ground_climbs(
+        dist, fuel, time, mass, feasible, low_climb_dist = _compute_ground_climbs(
             fl_choices,
             70_000.0,
             atyp,
@@ -261,6 +261,10 @@ class TestComputeGroundClimbs:
             np.zeros((1, 1), dtype=FLOAT_DTYPE),
         )
 
+        # Climbing to the lowest FL is entirely the low-altitude phase
+        assert low_climb_dist.shape == (1, 1)
+        assert low_climb_dist[0, 0] > 0.0
+        assert low_climb_dist[0, 0] == pytest.approx(dist[0, 0])
         assert dist.shape == (1, 3)
         assert fuel.shape == (1, 3)
         assert time.shape == (1, 3)
@@ -274,7 +278,7 @@ class TestComputeGroundClimbs:
         """Higher FL requires more distance, fuel, and time from ground."""
         fl_choices = np.array([29_000.0, 33_000.0, 37_000.0], dtype=FLOAT_DTYPE)
 
-        dist, fuel, time, _, _ = _compute_ground_climbs(
+        dist, fuel, time, _, _, _ = _compute_ground_climbs(
             fl_choices,
             70_000.0,
             atyp,
