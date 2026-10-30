@@ -467,3 +467,83 @@ def final_descent(
     ).astype(src_alt_ft.dtype)
 
     return descent_dist, descent_fuel, descent_time
+
+
+def compute_descent_segment(
+    src_alt_ft: npt.NDArray[np.floating],
+    dst_alt_ft: npt.NDArray[np.floating] | float,
+    atyp: ps_aircraft_params.PSAircraftEngineParams,
+    delta_isa: npt.NDArray[np.floating] | float,
+    tailwind: npt.NDArray[np.floating] | float,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """Integrate a 3 degree descent between two altitudes in 1000 ft steps.
+
+    This is the descent counterpart of :func:`compute_climb_segment`. It uses the same fixed
+    descent angle, speed schedule and mass (maximum landing weight) as :func:`final_descent`,
+    so the ground distance does not depend on ``delta_isa`` or ``tailwind``. In each step the
+    air temperature is ISA plus ``delta_isa``, which sets the true airspeed and fuel flow, and
+    ``tailwind`` sets the ground speed, which sets the time and so the fuel.
+
+    With ``delta_isa = 0`` and ``tailwind = 0``, a descent from ``src_alt_ft`` to ``dst_alt_ft``
+    followed by :func:`final_descent` from ``dst_alt_ft`` matches :func:`final_descent` from
+    ``src_alt_ft`` when both altitudes lie on 1000 ft boundaries.
+
+    Parameters
+    ----------
+    src_alt_ft : npt.NDArray[np.floating]
+        Starting altitude(s) in feet.
+    dst_alt_ft : npt.NDArray[np.floating] | float
+        Ending altitude(s) in feet, at or below ``src_alt_ft``.
+    atyp : ps_aircraft_params.PSAircraftEngineParams
+        Aircraft/engine parameters.
+    delta_isa : npt.NDArray[np.floating] | float
+        Temperature offset from ISA in K, constant over the descent.
+    tailwind : npt.NDArray[np.floating] | float
+        Along-track tailwind component in m/s, constant over the descent.
+
+    Returns
+    -------
+    descent_dist : npt.NDArray[np.floating]
+        Horizontal distance consumed by the descent, in meters.
+    descent_fuel : npt.NDArray[np.floating]
+        Fuel burned during the descent, in kg.
+    descent_time : npt.NDArray[np.floating]
+        Time for the descent, in seconds.
+
+    All three are shaped like the broadcast of the inputs.
+    """
+    src_alt_ft, dst_alt_ft, delta_isa, tailwind = np.broadcast_arrays(
+        src_alt_ft, dst_alt_ft, delta_isa, tailwind
+    )
+    descent_angle = np.float32(-3.0)
+    band_dist = units.ft_to_m(1000.0) / np.tan(np.deg2rad(-descent_angle))
+
+    alt_ft = src_alt_ft.copy()
+    total_dist = np.zeros_like(src_alt_ft)  # m
+    total_fuel = np.zeros_like(src_alt_ft)  # kg
+    total_time = np.zeros_like(src_alt_ft)  # s
+
+    while True:
+        active = alt_ft > dst_alt_ft
+        if not np.any(active):
+            break
+
+        step = np.minimum(1000.0, alt_ft[active] - dst_alt_ft[active])
+        mid_alt_ft = alt_ft[active] - step / 2.0
+
+        air_temperature = units.m_to_T_isa(units.ft_to_m(mid_alt_ft)) + delta_isa[active]
+        mass = np.full_like(mid_alt_ft, atyp.amass_mlw)
+        ff, _, tas = descent_performance(mid_alt_ft, mass, air_temperature, atyp)
+
+        ground_speed = tas + tailwind[active]
+        if np.any(ground_speed <= 0.0):
+            raise RuntimeError("Non-positive ground speed: headwind exceeds TAS during descent")
+
+        dist = band_dist * step / 1000.0
+        dt_s = dist / ground_speed
+        total_dist[active] += dist
+        total_fuel[active] += ff * dt_s
+        total_time[active] += dt_s
+        alt_ft[active] -= step
+
+    return total_dist, total_fuel, total_time
