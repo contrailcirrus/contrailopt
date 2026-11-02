@@ -5,6 +5,9 @@ on:
 
   workflow_dispatch:
 
+env:
+  PYCONTRAILS_CACHE_DIR: '${{ github.workspace }}/.cache/pycontrails'
+
 jobs:
   execute:
     runs-on: ubuntu-latest
@@ -17,16 +20,25 @@ jobs:
           python-version: '3.14'
           cache-suffix: notebooks
 
-      # Restore cached ERA5 and Google Contrail Forecasts
+      # Restore cached Google Contrail Forecasts
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cache/pycontrails
+          path: ${{ env.PYCONTRAILS_CACHE_DIR }}
           key: pycontrails-${{ hashFiles('docs/notebooks/*.ipynb') }}
           restore-keys: pycontrails-
 
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Download ERA5 data from pre-cached data on GCP
+        run: |
+          mkdir -p ${{ env.PYCONTRAILS_CACHE_DIR }}
+          gcloud storage cp gs://contrails-301217-unit-test/contrailopt-notebook-cache/* ${{ env.PYCONTRAILS_CACHE_DIR }}/
+
       - env:
           CONTRAILS_API_KEY: ${{ secrets.CONTRAILS_API_KEY }}
-          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
-          CDSAPI_URL: 'https://cds.climate.copernicus.eu/api'
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: uv run --group notebooks pytest --nbmake --nbmake-timeout=3000 docs/notebooks
