@@ -19,5 +19,13 @@ updates:
   - package-ecosystem: "pre-commit"
     directory: "/"
     schedule:
-      # Check for updates to pre-commit hooks every week
-      interval: "weekly"
+      # Check for updates to pre-commit hooks every month
+      interval: "monthly"
+    # Wait 7 days after a release before proposing it
+    cooldown:
+      default-days: 7
+    # Combine all hook updates into a single PR
+    groups:
+      hooks:
+        patterns:
+          - "*"
